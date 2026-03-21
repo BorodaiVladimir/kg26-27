@@ -28,38 +28,19 @@ cbuffer cbPass : register(b1)
     float4 gUnusedLights[32];
 }
 
-struct DirectionalLightSource
+struct DeferredLightGpu
 {
-    float3 Direction;
-    float Pad0;
     float3 Strength;
-    float Pad1;
-};
-
-struct PointLightSource
-{
-    float3 Position;
-    float FalloffStart;
-    float3 Strength;
-    float FalloffEnd;
-};
-
-struct SpotLightSource
-{
+    float Type;
     float3 Position;
     float FalloffStart;
     float3 Direction;
     float FalloffEnd;
-    float3 Strength;
     float SpotPower;
+    float3 Padding;
 };
 
-cbuffer cbDeferredLight : register(b3)
-{
-    DirectionalLightSource gDirectionalLights[NUM_DIR_LIGHTS];
-    PointLightSource gPointLights[NUM_POINT_LIGHTS];
-    SpotLightSource gSpotLights[NUM_SPOT_LIGHTS];
-}
+StructuredBuffer<DeferredLightGpu> gLights : register(t4);
 
 struct VSOut
 {
@@ -77,7 +58,7 @@ VSOut VS(uint id : SV_VertexID)
     return vout;
 }
 
-float3 ComputeDirectional(DirectionalLightSource lightSrc, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
+float3 ComputeDirectional(DeferredLightGpu lightSrc, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
 {
     float3 lightVec = normalize(-lightSrc.Direction);
     float ndotl = saturate(dot(normal, lightVec));
@@ -87,7 +68,7 @@ float3 ComputeDirectional(DirectionalLightSource lightSrc, float3 normal, float3
     return (diffuse + specColor) * lightSrc.Strength * ndotl;
 }
 
-float3 ComputePoint(PointLightSource lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
+float3 ComputePoint(DeferredLightGpu lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
 {
     float3 toLight = lightSrc.Position - posW;
     float dist = length(toLight);
@@ -105,7 +86,7 @@ float3 ComputePoint(PointLightSource lightSrc, float3 posW, float3 normal, float
     return (diffuse + specColor) * lightSrc.Strength * ndotl * att;
 }
 
-float3 ComputeSpot(SpotLightSource lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
+float3 ComputeSpot(DeferredLightGpu lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
 {
     float3 toLight = lightSrc.Position - posW;
     float dist = length(toLight);
@@ -136,25 +117,24 @@ float4 PS(VSOut pin) : SV_Target
     float3 fresnelR0 = material.xyz;
     float roughness = material.w;
 
-    // Start with ambient, then accumulate each light class from arrays.
     float3 lighting = gAmbientLight.rgb * albedo.rgb;
 
     [unroll]
     for (int i = 0; i < NUM_DIR_LIGHTS; ++i)
     {
-        lighting += ComputeDirectional(gDirectionalLights[i], normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputeDirectional(gLights[i], normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     [unroll]
     for (int i = 0; i < NUM_POINT_LIGHTS; ++i)
     {
-        lighting += ComputePoint(gPointLights[i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputePoint(gLights[NUM_DIR_LIGHTS + i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     [unroll]
     for (int i = 0; i < NUM_SPOT_LIGHTS; ++i)
     {
-        lighting += ComputeSpot(gSpotLights[i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     return float4(lighting, albedo.a);

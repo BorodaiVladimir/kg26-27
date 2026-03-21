@@ -1,6 +1,7 @@
 #define MaxLights 16
 
 Texture2D gDiffuseMap : register(t0);
+Texture2D gCheckerAltMap : register(t1);
 SamplerState gsamLinear : register(s0);
 
 cbuffer cbPerObject : register(b0)
@@ -79,8 +80,15 @@ GBufferOut PS(VertexOut pin)
 {
     GBufferOut gout;
 
-    float4 texColor = gDiffuseMap.Sample(gsamLinear, pin.TexC);
     float3 normal = normalize(pin.NormalW);
+    float2 floorUv = pin.PosW.xz * 0.12f;
+    float checkerCell = fmod(floor(floorUv.x) + floor(floorUv.y), 2.0f);
+    float floorMask = (normal.y > 0.75f && pin.PosW.y < -0.75f) ? 1.0f : 0.0f;
+
+    float4 texColorA = gDiffuseMap.Sample(gsamLinear, pin.TexC);
+    float4 texColorB = gCheckerAltMap.Sample(gsamLinear, pin.TexC * 2.0f);
+    float4 checkerMix = lerp(texColorA, texColorB, checkerCell);
+    float4 texColor = lerp(texColorA, checkerMix, floorMask);
     float4 albedo = texColor * gDiffuseAlbedo;
 
     gout.Albedo = albedo;

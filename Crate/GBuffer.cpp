@@ -18,7 +18,7 @@ void GBuffer::Initialize(ID3D12Device* device, UINT width, UINT height)
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mRtvHeap)));
 
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = BufferCount;
+    srvHeapDesc.NumDescriptors = TotalSrvCount;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(mDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -86,6 +86,13 @@ D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetRtv(UINT index) const
 D3D12_GPU_DESCRIPTOR_HANDLE GBuffer::GetSrvGpu(UINT index) const
 {
     CD3DX12_GPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    handle.Offset(static_cast<INT>(index), mSrvDescriptorSize);
+    return handle;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE GBuffer::GetSrvCpu(UINT index) const
+{
+    CD3DX12_CPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
     handle.Offset(static_cast<INT>(index), mSrvDescriptorSize);
     return handle;
 }

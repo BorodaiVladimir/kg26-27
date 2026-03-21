@@ -300,7 +300,9 @@ void CrateApp::Draw(const GameTimer& gt)
     auto passCB = mCurrFrameResource->PassCB->Resource();
     auto passAddress = passCB->GetGPUVirtualAddress();
 
-    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress);
+    CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+    checkerTex.Offset(1, mCbvSrvDescriptorSize);
+    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex);
 
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
 
@@ -311,12 +313,13 @@ void CrateApp::Draw(const GameTimer& gt)
     mCommandList->ResourceBarrier(1, &transition);
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
-    auto lightCB = mCurrFrameResource->DeferredLightCB->Resource();
     mRenderingSystem->ExecuteLightingPass(
         mCommandList.Get(),
         CurrentBackBufferView(),
         passAddress,
-        lightCB->GetGPUVirtualAddress());
+        mCurrFrameResource->DeferredLightBuffer->Resource(),
+        kDeferredTotalLightCount,
+        sizeof(DeferredLightGpu));
 
     transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -564,7 +567,7 @@ void CrateApp::LoadOBJModels()
         }
     }
 
-    int nextHeapIndex = 1;
+    int nextHeapIndex = 2;
     for (const auto& pair : materialToTexture)
     {
         const std::string& matName = pair.first;
@@ -704,6 +707,14 @@ void CrateApp::LoadTextures()
         woodCrateTex->Resource, woodCrateTex->UploadHeap));
 
     mTextures[woodCrateTex->Name] = std::move(woodCrateTex);
+
+    auto checkerTex = std::make_unique<Texture>();
+    checkerTex->Name = "checkerTex";
+    checkerTex->Filename = L"../Textures/checkboard.dds";
+    ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(md3dDevice.Get(),
+        mCommandList.Get(), checkerTex->Filename.c_str(),
+        checkerTex->Resource, checkerTex->UploadHeap));
+    mTextures[checkerTex->Name] = std::move(checkerTex);
     OutputDebugStringA("Wood crate texture loaded\n");
 }
 
@@ -756,6 +767,7 @@ void CrateApp::BuildDescriptorHeaps()
     CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
 
     auto woodCrateTex = mTextures["woodCrateTex"]->Resource;
+    auto checkerTex = mTextures["checkerTex"]->Resource;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -766,6 +778,11 @@ void CrateApp::BuildDescriptorHeaps()
     srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
 
     md3dDevice->CreateShaderResourceView(woodCrateTex.Get(), &srvDesc, hDescriptor);
+
+    hDescriptor.Offset(1, mCbvSrvDescriptorSize);
+    srvDesc.Format = checkerTex->GetDesc().Format;
+    srvDesc.Texture2D.MipLevels = checkerTex->GetDesc().MipLevels;
+    md3dDevice->CreateShaderResourceView(checkerTex.Get(), &srvDesc, hDescriptor);
     OutputDebugStringA("Descriptor heap built\n");
 }
 
@@ -1102,21 +1119,37 @@ void CrateApp::UpdateDeferredLightCB()
     mSpotLights[1].Position = mEyePos;
     XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
 
-    DeferredLightConstants lightConstants = {};
-    for (UINT i = 0; i < kDeferredDirectionalLightCount; ++i)
+    UINT dst = 0;
+    for (UINT i = 0; i < kDeferredDirectionalLightCount; ++i, ++dst)
     {
-        lightConstants.DirectionalLights[i] = mDirectionalLights[i];
+        DeferredLightGpu l = {};
+        l.Type = 0.0f;
+        l.Direction = mDirectionalLights[i].Direction;
+        l.Strength = mDirectionalLights[i].Strength;
+        mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }
-    for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+    for (UINT i = 0; i < kDeferredPointLightCount; ++i, ++dst)
     {
-        lightConstants.PointLights[i] = mPointLights[i];
+        DeferredLightGpu l = {};
+        l.Type = 1.0f;
+        l.Position = mPointLights[i].Position;
+        l.Strength = mPointLights[i].Strength;
+        l.FalloffStart = mPointLights[i].FalloffStart;
+        l.FalloffEnd = mPointLights[i].FalloffEnd;
+        mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }
-    for (UINT i = 0; i < kDeferredSpotLightCount; ++i)
+    for (UINT i = 0; i < kDeferredSpotLightCount; ++i, ++dst)
     {
-        lightConstants.SpotLights[i] = mSpotLights[i];
+        DeferredLightGpu l = {};
+        l.Type = 2.0f;
+        l.Position = mSpotLights[i].Position;
+        l.Direction = mSpotLights[i].Direction;
+        l.Strength = mSpotLights[i].Strength;
+        l.FalloffStart = mSpotLights[i].FalloffStart;
+        l.FalloffEnd = mSpotLights[i].FalloffEnd;
+        l.SpotPower = mSpotLights[i].SpotPower;
+        mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }
-
-    mCurrFrameResource->DeferredLightCB->CopyData(0, lightConstants);
 }
 
 void CrateApp::OnMouseDown(WPARAM btnState, int x, int y)

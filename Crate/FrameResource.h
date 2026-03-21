@@ -48,7 +48,7 @@ public:
 
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> CmdListAlloc;
     std::unique_ptr<UploadBuffer<PassConstants>> PassCB;
-    std::unique_ptr<UploadBuffer<DeferredLightConstants>> DeferredLightCB;
+    std::unique_ptr<UploadBuffer<DeferredLightGpu>> DeferredLightBuffer;
     std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB;
     UINT64 Fence = 0;

@@ -36,7 +36,8 @@ void RenderingSystem::OnResize(UINT width, UINT height)
 void RenderingSystem::BeginGeometryPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress)
+    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+    D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle)
 {
     mGBuffer.TransitionToRenderTargets(cmdList);
     mGBuffer.Clear(cmdList);
@@ -54,6 +55,7 @@ void RenderingSystem::BeginGeometryPass(
     cmdList->SetPipelineState(mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
+    cmdList->SetGraphicsRootDescriptorTable(4, checkerTextureHandle);
 }
 
 void RenderingSystem::EndGeometryPass(ID3D12GraphicsCommandList* cmdList)
@@ -65,8 +67,20 @@ void RenderingSystem::ExecuteLightingPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
     D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
-    D3D12_GPU_VIRTUAL_ADDRESS lightCbAddress)
+    ID3D12Resource* lightBufferResource,
+    UINT lightCount,
+    UINT lightStrideBytes)
 {
+    D3D12_SHADER_RESOURCE_VIEW_DESC lightSrvDesc = {};
+    lightSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    lightSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    lightSrvDesc.Format = DXGI_FORMAT_UNKNOWN;
+    lightSrvDesc.Buffer.FirstElement = 0;
+    lightSrvDesc.Buffer.NumElements = lightCount;
+    lightSrvDesc.Buffer.StructureByteStride = lightStrideBytes;
+    lightSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+    mDevice->CreateShaderResourceView(lightBufferResource, &lightSrvDesc, mGBuffer.GetSrvCpu(GBuffer::BufferCount));
+
     cmdList->OMSetRenderTargets(1, &backBufferRtv, true, nullptr);
     cmdList->SetPipelineState(mLightingPSO.Get());
     cmdList->SetGraphicsRootSignature(mLightingRootSignature.Get());
@@ -76,7 +90,6 @@ void RenderingSystem::ExecuteLightingPass(
 
     cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(0));
     cmdList->SetGraphicsRootConstantBufferView(1, passCbAddress);
-    cmdList->SetGraphicsRootConstantBufferView(2, lightCbAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -85,12 +98,15 @@ void RenderingSystem::BuildGeometryRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE texTable;
     texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE checkerTable;
+    checkerTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
     slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(0);
     slotRootParameter[2].InitAsConstantBufferView(1);
     slotRootParameter[3].InitAsConstantBufferView(2);
+    slotRootParameter[4].InitAsDescriptorTable(1, &checkerTable, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC linearWrap(
         0,
@@ -100,7 +116,7 @@ void RenderingSystem::BuildGeometryRootSignature()
         D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
-        4,
+        5,
         slotRootParameter,
         1,
         &linearWrap,
@@ -124,12 +140,11 @@ void RenderingSystem::BuildGeometryRootSignature()
 void RenderingSystem::BuildLightingRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE gbufferTable;
-    gbufferTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::BufferCount, 0);
+    gbufferTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::TotalSrvCount, 0);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[2];
     slotRootParameter[0].InitAsDescriptorTable(1, &gbufferTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(1);
-    slotRootParameter[2].InitAsConstantBufferView(3);
 
     CD3DX12_STATIC_SAMPLER_DESC pointClamp(
         0,
@@ -139,7 +154,7 @@ void RenderingSystem::BuildLightingRootSignature()
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
-        3,
+        2,
         slotRootParameter,
         1,
         &pointClamp,

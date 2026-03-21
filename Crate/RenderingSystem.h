@@ -20,7 +20,8 @@ public:
     void BeginGeometryPass(
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-        D3D12_GPU_VIRTUAL_ADDRESS passCbAddress);
+        D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+        D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle);
 
     void EndGeometryPass(ID3D12GraphicsCommandList* cmdList);
 
@@ -28,7 +29,9 @@ public:
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
-        D3D12_GPU_VIRTUAL_ADDRESS lightCbAddress);
+        ID3D12Resource* lightBufferResource,
+        UINT lightCount,
+        UINT lightStrideBytes);
 
 private:
     void BuildGeometryRootSignature();

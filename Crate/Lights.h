@@ -6,6 +6,8 @@
 constexpr std::uint32_t kDeferredDirectionalLightCount = 1;
 constexpr std::uint32_t kDeferredPointLightCount = 4;
 constexpr std::uint32_t kDeferredSpotLightCount = 2;
+constexpr std::uint32_t kDeferredTotalLightCount =
+    kDeferredDirectionalLightCount + kDeferredPointLightCount + kDeferredSpotLightCount;
 
 struct DirectionalLightSource
 {
@@ -38,4 +40,16 @@ struct DeferredLightConstants
     DirectionalLightSource DirectionalLights[kDeferredDirectionalLightCount];
     PointLightSource PointLights[kDeferredPointLightCount];
     SpotLightSource SpotLights[kDeferredSpotLightCount];
+};
+
+struct DeferredLightGpu
+{
+    DirectX::XMFLOAT3 Strength = { 0.0f, 0.0f, 0.0f };
+    float Type = 0.0f;
+    DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, 0.0f };
+    float FalloffStart = 0.0f;
+    DirectX::XMFLOAT3 Direction = { 0.0f, -1.0f, 0.0f };
+    float FalloffEnd = 0.0f;
+    float SpotPower = 0.0f;
+    DirectX::XMFLOAT3 Padding = { 0.0f, 0.0f, 0.0f };
 };

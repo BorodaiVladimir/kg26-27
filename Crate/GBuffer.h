@@ -6,6 +6,8 @@ class GBuffer
 {
 public:
     static constexpr UINT BufferCount = 4;
+    static constexpr UINT ExtraSrvCount = 1;
+    static constexpr UINT TotalSrvCount = BufferCount + ExtraSrvCount;
 
 public:
     void Initialize(ID3D12Device* device, UINT width, UINT height);
@@ -16,6 +18,7 @@ public:
     void Clear(ID3D12GraphicsCommandList* cmdList);
 
     D3D12_CPU_DESCRIPTOR_HANDLE GetRtv(UINT index) const;
+    D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpu(UINT index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE GetSrvGpu(UINT index) const;
     ID3D12DescriptorHeap* GetSrvHeap() const { return mSrvHeap.Get(); }
 
