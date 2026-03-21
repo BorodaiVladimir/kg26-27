@@ -1,0 +1,55 @@
+# Visual Studio user/temporary files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+ipch/
+*.ilk
+*.pdb
+*.idb
+*.obj
+*.pch
+*.tlog
+*.lastbuildstate
+*.log
+
+# CMake/Ninja artifacts (if used)
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+build/
+out/
+*.ninja
+.ninja_deps
+.ninja_log
+
+# NuGet artifacts
+packages/*
+!packages.config
+*.nupkg
+*.snupkg
+project.assets.json
+project.nuget.cache
+
+# Generated shader/object caches
+*.dxbc
+*.cso
+
+# Runtime dumps
+*.dmp
+*.stackdump
+
+# OS files
+Thumbs.db
+Desktop.ini
