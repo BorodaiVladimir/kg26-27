@@ -2,7 +2,9 @@
 #include "../Common/MathHelper.h"
 #include "../Common/UploadBuffer.h"
 #include "../Common/GeometryGenerator.h"
+#include "Lights.h"
 #include "FrameResource.h"
+#include "RenderingSystem.h"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -72,6 +74,7 @@ private:
     void UpdateObjectCBs(const GameTimer& gt);
     void UpdateMaterialCBs(const GameTimer& gt);
     void UpdateMainPassCB(const GameTimer& gt);
+    void UpdateDeferredLightCB();
 
     void LoadTextures();
     void BuildRootSignature();
@@ -106,6 +109,7 @@ private:
 
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
+    std::unique_ptr<RenderingSystem> mRenderingSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mOpaqueRitems;
@@ -133,6 +137,10 @@ private:
     float mRadius = 8.0f;
 
     POINT mLastMousePos;
+
+    std::array<DirectionalLightSource, kDeferredDirectionalLightCount> mDirectionalLights;
+    std::array<PointLightSource, kDeferredPointLightCount> mPointLights;
+    std::array<SpotLightSource, kDeferredSpotLightCount> mSpotLights;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -161,6 +169,43 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mTheta = 1.3f * XM_PI;
     mPhi = 0.4f * XM_PI;
     mRadius = 8.0f;
+
+    mDirectionalLights[0].Direction = { 0.45f, -0.72f, 0.52f };
+    mDirectionalLights[0].Strength = { 0.20f, 0.35f, 1.40f };
+
+    mPointLights[0].Position = { -14.0f, 7.0f, -4.0f };
+    mPointLights[0].Strength = { 0.20f, 1.80f, 0.20f };
+    mPointLights[0].FalloffStart = 2.0f;
+    mPointLights[0].FalloffEnd = 24.0f;
+
+    mPointLights[1].Position = { 14.0f, 7.0f, -4.0f };
+    mPointLights[1].Strength = { 0.20f, 1.80f, 0.20f };
+    mPointLights[1].FalloffStart = 2.0f;
+    mPointLights[1].FalloffEnd = 24.0f;
+
+    mPointLights[2].Position = { -10.0f, 6.0f, 16.0f };
+    mPointLights[2].Strength = { 0.20f, 1.80f, 0.20f };
+    mPointLights[2].FalloffStart = 2.0f;
+    mPointLights[2].FalloffEnd = 22.0f;
+
+    mPointLights[3].Position = { 10.0f, 6.0f, 16.0f };
+    mPointLights[3].Strength = { 0.20f, 1.80f, 0.20f };
+    mPointLights[3].FalloffStart = 2.0f;
+    mPointLights[3].FalloffEnd = 22.0f;
+
+    mSpotLights[0].Position = { 0.0f, 12.0f, -30.0f };
+    mSpotLights[0].Direction = { 0.0f, -0.35f, 1.0f };
+    mSpotLights[0].Strength = { 1.90f, 0.15f, 0.15f };
+    mSpotLights[0].FalloffStart = 4.0f;
+    mSpotLights[0].FalloffEnd = 65.0f;
+    mSpotLights[0].SpotPower = 28.0f;
+
+    mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
+    mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
+    mSpotLights[1].Strength = { 1.70f, 0.12f, 0.12f };
+    mSpotLights[1].FalloffStart = 1.5f;
+    mSpotLights[1].FalloffEnd = 70.0f;
+    mSpotLights[1].SpotPower = 34.0f;
 }
 
 CrateApp::~CrateApp()
@@ -179,14 +224,21 @@ bool CrateApp::Initialize()
     mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     LoadTextures();
-    BuildRootSignature();
     BuildDescriptorHeaps();
-    BuildShadersAndInputLayout();
     LoadOBJModels();
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
-    BuildPSOs();
+
+    mRenderingSystem = std::make_unique<RenderingSystem>();
+    mRenderingSystem->Initialize(
+        md3dDevice.Get(),
+        mClientWidth,
+        mClientHeight,
+        mBackBufferFormat,
+        mDepthStencilFormat,
+        m4xMsaaState,
+        m4xMsaaQuality);
 
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
@@ -200,6 +252,11 @@ bool CrateApp::Initialize()
 void CrateApp::OnResize()
 {
     D3DApp::OnResize();
+
+    if (mRenderingSystem)
+    {
+        mRenderingSystem->OnResize(mClientWidth, mClientHeight);
+    }
 
     XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
     XMStoreFloat4x4(&mProj, P);
@@ -224,6 +281,7 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
+    UpdateDeferredLightCB();
 }
 
 void CrateApp::Draw(const GameTimer& gt)
@@ -231,7 +289,7 @@ void CrateApp::Draw(const GameTimer& gt)
     auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
 
     ThrowIfFailed(cmdListAlloc->Reset());
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), nullptr));
 
     mCommandList->RSSetViewports(1, &mScreenViewport);
     mCommandList->RSSetScissorRects(1, &mScissorRect);
@@ -242,21 +300,23 @@ void CrateApp::Draw(const GameTimer& gt)
     auto passCB = mCurrFrameResource->PassCB->Resource();
     auto passAddress = passCB->GetGPUVirtualAddress();
 
+    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress);
+
+    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+
+    mRenderingSystem->EndGeometryPass(mCommandList.Get());
+
     auto transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
     mCommandList->ResourceBarrier(1, &transition);
+    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
-    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
-    mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-
-    auto currentBackBufferView = CurrentBackBufferView();
-    auto depthStencilView = DepthStencilView();
-    mCommandList->OMSetRenderTargets(1, &currentBackBufferView, true, &depthStencilView);
-
-    mCommandList->SetGraphicsRootSignature(mRootSignature.Get());
-    mCommandList->SetGraphicsRootConstantBufferView(2, passAddress);
-
-    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+    auto lightCB = mCurrFrameResource->DeferredLightCB->Resource();
+    mRenderingSystem->ExecuteLightingPass(
+        mCommandList.Get(),
+        CurrentBackBufferView(),
+        passAddress,
+        lightCB->GetGPUVirtualAddress());
 
     transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
@@ -1031,6 +1091,32 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 
     auto currPassCB = mCurrFrameResource->PassCB.get();
     currPassCB->CopyData(0, mMainPassCB);
+}
+
+void CrateApp::UpdateDeferredLightCB()
+{
+    XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
+    XMVECTOR lookAt = XMVectorZero();
+    XMVECTOR viewDir = XMVector3Normalize(lookAt - eyePos);
+
+    mSpotLights[1].Position = mEyePos;
+    XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
+
+    DeferredLightConstants lightConstants = {};
+    for (UINT i = 0; i < kDeferredDirectionalLightCount; ++i)
+    {
+        lightConstants.DirectionalLights[i] = mDirectionalLights[i];
+    }
+    for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+    {
+        lightConstants.PointLights[i] = mPointLights[i];
+    }
+    for (UINT i = 0; i < kDeferredSpotLightCount; ++i)
+    {
+        lightConstants.SpotLights[i] = mSpotLights[i];
+    }
+
+    mCurrFrameResource->DeferredLightCB->CopyData(0, lightConstants);
 }
 
 void CrateApp::OnMouseDown(WPARAM btnState, int x, int y)

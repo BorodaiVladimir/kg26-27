@@ -1,23 +1,3 @@
-//--------------------------------------------------------------------------------------
-// File: DDSTextureLoader.cpp
-//
-// Functions for loading a DDS texture and creating a Direct3D 11 runtime resource for it
-//
-// Note these functions are useful as a light-weight runtime loader for DDS files. For
-// a full-featured DDS file reader, writer, and texture processing pipeline see
-// the 'Texconv' sample and the 'DirectXTex' library.
-//
-// THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF
-// ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-// THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A
-// PARTICULAR PURPOSE.
-//
-// Copyright (c) Microsoft Corporation. All rights reserved.
-//
-// http://go.microsoft.com/fwlink/?LinkId=248926
-// http://go.microsoft.com/fwlink/?LinkId=248929
-//--------------------------------------------------------------------------------------
-
 #include <assert.h>
 #include <algorithm>
 #include <memory>
@@ -33,23 +13,14 @@ using namespace Microsoft::WRL;
 
 using namespace DirectX;
 
-//--------------------------------------------------------------------------------------
-// Macros
-//--------------------------------------------------------------------------------------
 #ifndef MAKEFOURCC
     #define MAKEFOURCC(ch0, ch1, ch2, ch3)                              \
                 ((uint32_t)(uint8_t)(ch0) | ((uint32_t)(uint8_t)(ch1) << 8) |       \
                 ((uint32_t)(uint8_t)(ch2) << 16) | ((uint32_t)(uint8_t)(ch3) << 24 ))
-#endif /* defined(MAKEFOURCC) */
-
-//--------------------------------------------------------------------------------------
-// DDS file structure definitions
-//
-// See DDS.h in the 'Texconv' sample and the 'DirectXTex' library
-//--------------------------------------------------------------------------------------
+#endif 
 #pragma pack(push,1)
 
-const uint32_t DDS_MAGIC = 0x20534444; // "DDS "
+const uint32_t DDS_MAGIC = 0x20534444; 
 
 struct DDS_PIXELFORMAT
 {
@@ -2181,51 +2152,6 @@ HRESULT DirectX::CreateDDSTextureFromFile12(_In_ ID3D12Device* device,
 
 	if (SUCCEEDED(hr))
 	{
-/*
-#if !defined(NO_D3D11_DEBUG_NAME) && ( defined(_DEBUG) || defined(PROFILE) )
-		if (texture != 0 || textureView != 0)
-		{
-			CHAR strFileA[MAX_PATH];
-			int result = WideCharToMultiByte(CP_ACP,
-				WC_NO_BEST_FIT_CHARS,
-				fileName,
-				-1,
-				strFileA,
-				MAX_PATH,
-				nullptr,
-				FALSE
-				);
-			if (result > 0)
-			{
-				const CHAR* pstrName = strrchr(strFileA, '\\');
-				if (!pstrName)
-				{
-					pstrName = strFileA;
-				}
-				else
-				{
-					pstrName++;
-				}
-
-				if (texture != 0 && *texture != 0)
-				{
-					(*texture)->SetPrivateData(WKPDID_D3DDebugObjectName,
-						static_cast<UINT>(strnlen_s(pstrName, MAX_PATH)),
-						pstrName
-						);
-				}
-
-				if (textureView != 0 && *textureView != 0)
-				{
-					(*textureView)->SetPrivateData(WKPDID_D3DDebugObjectName,
-						static_cast<UINT>(strnlen_s(pstrName, MAX_PATH)),
-						pstrName
-						);
-				}
-			}
-		}
-#endif
-*/
 		if (alphaMode)
 			*alphaMode = GetAlphaMode(header);
 	}

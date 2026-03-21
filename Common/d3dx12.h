@@ -1,12 +1,3 @@
-//////////////////////////////////////////////////////////////////////////////
-//
-//  Copyright (C) Microsoft Corporation.  All Rights Reserved.
-//
-//  File:       d3dx12.h
-//  Content:    D3DX12 utility library
-//
-//////////////////////////////////////////////////////////////////////////////
-
 #ifndef __D3DX12_H__
 #define __D3DX12_H__
 
@@ -1492,17 +1483,13 @@ inline bool D3D12IsLayoutOpaque( D3D12_TEXTURE_LAYOUT Layout )
 //------------------------------------------------------------------------------------------------
 inline ID3D12CommandList * const * CommandListCast(ID3D12GraphicsCommandList * const * pp)
 {
-    // This cast is useful for passing strongly typed command list pointers into
-    // ExecuteCommandLists.
-    // This cast is valid as long as the const-ness is respected. D3D12 APIs do
-    // respect the const-ness of their arguments.
     return reinterpret_cast<ID3D12CommandList * const *>(pp);
 }
 
 
-#endif // defined( __cplusplus )
+#endif 
 
-#endif //__D3DX12_H__
+#endif 
 
 
 
