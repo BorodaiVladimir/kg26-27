@@ -8,6 +8,7 @@ FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT objectCo
 
     PassCB = std::make_unique<UploadBuffer<PassConstants>>(device, passCount, true);
     DeferredLightBuffer = std::make_unique<UploadBuffer<DeferredLightGpu>>(device, kDeferredTotalLightCount, false);
+    DeferredLightParamsCB = std::make_unique<UploadBuffer<DeferredLightParams>>(device, 1, true);
     MaterialCB = std::make_unique<UploadBuffer<MaterialConstants>>(device, materialCount, true);
     ObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device, objectCount, true);
 }

@@ -5,7 +5,7 @@ Texture2D gPosition : register(t3);
 SamplerState gsamPointClamp : register(s0);
 
 #define NUM_DIR_LIGHTS 1
-#define NUM_POINT_LIGHTS 4
+#define NUM_POINT_LIGHTS 256
 #define NUM_SPOT_LIGHTS 2
 
 cbuffer cbPass : register(b1)
@@ -26,6 +26,12 @@ cbuffer cbPass : register(b1)
     float gDeltaTime;
     float4 gAmbientLight;
     float4 gUnusedLights[32];
+}
+
+cbuffer cbDeferredParams : register(b2)
+{
+    uint gActivePointLights;
+    float3 gDeferredPad;
 }
 
 struct DeferredLightGpu
@@ -111,9 +117,9 @@ float4 PS(VSOut pin) : SV_Target
     float4 albedo = gAlbedo.Sample(gsamPointClamp, uv);
     float3 normal = normalize(gNormal.Sample(gsamPointClamp, uv).xyz * 2.0f - 1.0f);
     float4 material = gMaterial.Sample(gsamPointClamp, uv);
-    float3 posW = gPosition.Sample(gsamPointClamp, uv).xyz;
+    float3 posV = gPosition.Sample(gsamPointClamp, uv).xyz;
 
-    float3 toEye = normalize(gEyePosW - posW);
+    float3 toEye = normalize(-posV);
     float3 fresnelR0 = material.xyz;
     float roughness = material.w;
 
@@ -125,16 +131,16 @@ float4 PS(VSOut pin) : SV_Target
         lighting += ComputeDirectional(gLights[i], normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
-    [unroll]
-    for (int i = 0; i < NUM_POINT_LIGHTS; ++i)
+    int activePointCount = min((int)gActivePointLights, NUM_POINT_LIGHTS);
+    for (int i = 0; i < activePointCount; ++i)
     {
-        lighting += ComputePoint(gLights[NUM_DIR_LIGHTS + i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputePoint(gLights[NUM_DIR_LIGHTS + i], posV, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     [unroll]
     for (int i = 0; i < NUM_SPOT_LIGHTS; ++i)
     {
-        lighting += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + i], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + i], posV, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     return float4(lighting, albedo.a);

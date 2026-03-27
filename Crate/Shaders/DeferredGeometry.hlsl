@@ -51,6 +51,7 @@ struct VertexOut
     float3 PosW : POSITION;
     float3 NormalW : NORMAL;
     float2 TexC : TEXCOORD;
+    float3 PosV : POSITION1;
 };
 
 struct GBufferOut
@@ -68,6 +69,7 @@ VertexOut VS(VertexIn vin)
     float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
     vout.PosW = posW.xyz;
     vout.NormalW = normalize(mul(vin.NormalL, (float3x3)gWorld));
+    vout.PosV = mul(posW, gView).xyz;
     vout.PosH = mul(posW, gViewProj);
 
     float4 texC = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform);
@@ -94,7 +96,7 @@ GBufferOut PS(VertexOut pin)
     gout.Albedo = albedo;
     gout.Normal = float4(normalize(normal) * 0.5f + 0.5f, 1.0f);
     gout.Material = float4(gFresnelR0, saturate(gRoughness));
-    gout.Position = float4(pin.PosW, 1.0f);
+    gout.Position = float4(pin.PosV, 1.0f);
 
     return gout;
 }

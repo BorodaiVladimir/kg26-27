@@ -67,6 +67,7 @@ void RenderingSystem::ExecuteLightingPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
     D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+    D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
     ID3D12Resource* lightBufferResource,
     UINT lightCount,
     UINT lightStrideBytes)
@@ -90,6 +91,7 @@ void RenderingSystem::ExecuteLightingPass(
 
     cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(0));
     cmdList->SetGraphicsRootConstantBufferView(1, passCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(2, lightParamsCbAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -142,9 +144,10 @@ void RenderingSystem::BuildLightingRootSignature()
     CD3DX12_DESCRIPTOR_RANGE gbufferTable;
     gbufferTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::TotalSrvCount, 0);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[3];
     slotRootParameter[0].InitAsDescriptorTable(1, &gbufferTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(1);
+    slotRootParameter[2].InitAsConstantBufferView(2);
 
     CD3DX12_STATIC_SAMPLER_DESC pointClamp(
         0,
@@ -154,7 +157,7 @@ void RenderingSystem::BuildLightingRootSignature()
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
-        2,
+        3,
         slotRootParameter,
         1,
         &pointClamp,

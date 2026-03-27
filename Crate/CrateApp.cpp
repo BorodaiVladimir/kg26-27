@@ -141,6 +141,11 @@ private:
     std::array<DirectionalLightSource, kDeferredDirectionalLightCount> mDirectionalLights;
     std::array<PointLightSource, kDeferredPointLightCount> mPointLights;
     std::array<SpotLightSource, kDeferredSpotLightCount> mSpotLights;
+
+    float mSpawnAccumulator = 0.0f;
+    std::array<float, kDeferredPointLightCount> mFallingVelY{};
+    std::array<bool, kDeferredPointLightCount> mFallingActive{};
+    UINT mActivePointLights = 0;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -173,25 +178,15 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mDirectionalLights[0].Direction = { 0.45f, -0.72f, 0.52f };
     mDirectionalLights[0].Strength = { 0.20f, 0.35f, 1.40f };
 
-    mPointLights[0].Position = { -14.0f, 7.0f, -4.0f };
-    mPointLights[0].Strength = { 0.20f, 1.80f, 0.20f };
-    mPointLights[0].FalloffStart = 2.0f;
-    mPointLights[0].FalloffEnd = 24.0f;
-
-    mPointLights[1].Position = { 14.0f, 7.0f, -4.0f };
-    mPointLights[1].Strength = { 0.20f, 1.80f, 0.20f };
-    mPointLights[1].FalloffStart = 2.0f;
-    mPointLights[1].FalloffEnd = 24.0f;
-
-    mPointLights[2].Position = { -10.0f, 6.0f, 16.0f };
-    mPointLights[2].Strength = { 0.20f, 1.80f, 0.20f };
-    mPointLights[2].FalloffStart = 2.0f;
-    mPointLights[2].FalloffEnd = 22.0f;
-
-    mPointLights[3].Position = { 10.0f, 6.0f, 16.0f };
-    mPointLights[3].Strength = { 0.20f, 1.80f, 0.20f };
-    mPointLights[3].FalloffStart = 2.0f;
-    mPointLights[3].FalloffEnd = 22.0f;
+    for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+    {
+        mPointLights[i].Strength = { 0.20f, 1.20f, 0.20f };
+        mPointLights[i].FalloffStart = 0.6f;
+        mPointLights[i].FalloffEnd = 8.0f;
+        mPointLights[i].Position = { 0.0f, 10000.0f, 0.0f };
+        mFallingActive[i] = false;
+        mFallingVelY[i] = 0.0f;
+    }
 
     mSpotLights[0].Position = { 0.0f, 12.0f, -30.0f };
     mSpotLights[0].Direction = { 0.0f, -0.35f, 1.0f };
@@ -281,6 +276,49 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
+
+    if (!mFallingActive[0])
+    {
+        mFallingActive[0] = true;
+        mFallingVelY[0] = 0.0f;
+        mPointLights[0].Position = { 6.0f, 20.0f, 0.0f };
+    }
+
+    mSpawnAccumulator += gt.DeltaTime();
+    while (mSpawnAccumulator >= 1.0f)
+    {
+        mSpawnAccumulator -= 1.0f;
+        for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+        {
+            if (!mFallingActive[i])
+            {
+                mFallingActive[i] = true;
+                mFallingVelY[i] = 0.0f;
+                mPointLights[i].Position = { 6.0f, 20.0f, 0.0f };
+                break;
+            }
+        }
+    }
+
+    constexpr float fallSpeed = 21.0f;
+    constexpr float floorY = -1.0f;
+    for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+    {
+        if (!mFallingActive[i])
+            continue;
+
+        auto& L = mPointLights[i];
+        if (L.Position.y <= floorY + 1e-3f)
+            continue;
+
+        mFallingVelY[i] = -fallSpeed;
+        L.Position.y += mFallingVelY[i] * gt.DeltaTime();
+        if (L.Position.y <= floorY)
+        {
+            L.Position.y = floorY;
+            mFallingVelY[i] = 0.0f;
+        }
+    }
     UpdateDeferredLightCB();
 }
 
@@ -317,6 +355,7 @@ void CrateApp::Draw(const GameTimer& gt)
         mCommandList.Get(),
         CurrentBackBufferView(),
         passAddress,
+        mCurrFrameResource->DeferredLightParamsCB->Resource()->GetGPUVirtualAddress(),
         mCurrFrameResource->DeferredLightBuffer->Resource(),
         kDeferredTotalLightCount,
         sizeof(DeferredLightGpu));
@@ -1119,12 +1158,26 @@ void CrateApp::UpdateDeferredLightCB()
     mSpotLights[1].Position = mEyePos;
     XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
 
+    UINT activePointLights = 0;
+    for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+    {
+        if (mFallingActive[i])
+            ++activePointLights;
+    }
+    mActivePointLights = activePointLights;
+
+    DeferredLightParams params = {};
+    params.ActivePointLightCount = mActivePointLights;
+    mCurrFrameResource->DeferredLightParamsCB->CopyData(0, params);
+
     UINT dst = 0;
     for (UINT i = 0; i < kDeferredDirectionalLightCount; ++i, ++dst)
     {
         DeferredLightGpu l = {};
         l.Type = 0.0f;
-        l.Direction = mDirectionalLights[i].Direction;
+        XMVECTOR dirW = XMLoadFloat3(&mDirectionalLights[i].Direction);
+        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
+        XMStoreFloat3(&l.Direction, dirV);
         l.Strength = mDirectionalLights[i].Strength;
         mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }
@@ -1132,7 +1185,9 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 1.0f;
-        l.Position = mPointLights[i].Position;
+        XMVECTOR posW = XMLoadFloat3(&mPointLights[i].Position);
+        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
+        XMStoreFloat3(&l.Position, posV);
         l.Strength = mPointLights[i].Strength;
         l.FalloffStart = mPointLights[i].FalloffStart;
         l.FalloffEnd = mPointLights[i].FalloffEnd;
@@ -1142,8 +1197,13 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 2.0f;
-        l.Position = mSpotLights[i].Position;
-        l.Direction = mSpotLights[i].Direction;
+        XMVECTOR posW = XMLoadFloat3(&mSpotLights[i].Position);
+        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
+        XMStoreFloat3(&l.Position, posV);
+
+        XMVECTOR dirW = XMLoadFloat3(&mSpotLights[i].Direction);
+        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
+        XMStoreFloat3(&l.Direction, dirV);
         l.Strength = mSpotLights[i].Strength;
         l.FalloffStart = mSpotLights[i].FalloffStart;
         l.FalloffEnd = mSpotLights[i].FalloffEnd;

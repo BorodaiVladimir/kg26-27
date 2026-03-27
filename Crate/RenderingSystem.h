@@ -29,6 +29,7 @@ public:
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+        D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
         ID3D12Resource* lightBufferResource,
         UINT lightCount,
         UINT lightStrideBytes);
