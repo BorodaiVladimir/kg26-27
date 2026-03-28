@@ -21,7 +21,8 @@ public:
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv,
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
-        D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle);
+        D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle,
+        bool wireframe);
 
     void EndGeometryPass(ID3D12GraphicsCommandList* cmdList);
 
@@ -58,5 +59,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryWireframePSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO = nullptr;
 };

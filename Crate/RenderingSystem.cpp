@@ -37,7 +37,8 @@ void RenderingSystem::BeginGeometryPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsv,
     D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
-    D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle)
+    D3D12_GPU_DESCRIPTOR_HANDLE checkerTextureHandle,
+    bool wireframe)
 {
     mGBuffer.TransitionToRenderTargets(cmdList);
     mGBuffer.Clear(cmdList);
@@ -52,7 +53,7 @@ void RenderingSystem::BeginGeometryPass(
     };
     cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 
-    cmdList->SetPipelineState(mGeometryPSO.Get());
+    cmdList->SetPipelineState(wireframe ? mGeometryWireframePSO.Get() : mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
     cmdList->SetGraphicsRootDescriptorTable(4, checkerTextureHandle);
@@ -102,13 +103,16 @@ void RenderingSystem::BuildGeometryRootSignature()
     texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
     CD3DX12_DESCRIPTOR_RANGE checkerTable;
     checkerTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    CD3DX12_DESCRIPTOR_RANGE texTableB;
+    texTableB.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
+    CD3DX12_ROOT_PARAMETER slotRootParameter[6];
     slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(0);
     slotRootParameter[2].InitAsConstantBufferView(1);
     slotRootParameter[3].InitAsConstantBufferView(2);
-    slotRootParameter[4].InitAsDescriptorTable(1, &checkerTable, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[4].InitAsDescriptorTable(1, &checkerTable, D3D12_SHADER_VISIBILITY_ALL);
+    slotRootParameter[5].InitAsDescriptorTable(1, &texTableB, D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_STATIC_SAMPLER_DESC linearWrap(
         0,
@@ -118,7 +122,7 @@ void RenderingSystem::BuildGeometryRootSignature()
         D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
-        5,
+        6,
         slotRootParameter,
         1,
         &linearWrap,
@@ -181,6 +185,8 @@ void RenderingSystem::BuildLightingRootSignature()
 void RenderingSystem::BuildShadersAndInputLayout()
 {
     mShaders["deferredGeometryVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["deferredGeometryHS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "HS", "hs_5_0");
+    mShaders["deferredGeometryDS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "DS", "ds_5_0");
     mShaders["deferredGeometryPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "PS", "ps_5_0");
     mShaders["deferredLightVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["deferredLightPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "PS", "ps_5_0");
@@ -208,11 +214,21 @@ void RenderingSystem::BuildPSOs()
         reinterpret_cast<BYTE*>(mShaders["deferredGeometryPS"]->GetBufferPointer()),
         mShaders["deferredGeometryPS"]->GetBufferSize()
     };
+    geometryPsoDesc.HS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["deferredGeometryHS"]->GetBufferPointer()),
+        mShaders["deferredGeometryHS"]->GetBufferSize()
+    };
+    geometryPsoDesc.DS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["deferredGeometryDS"]->GetBufferPointer()),
+        mShaders["deferredGeometryDS"]->GetBufferSize()
+    };
     geometryPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     geometryPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     geometryPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
     geometryPsoDesc.SampleMask = UINT_MAX;
-    geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     geometryPsoDesc.NumRenderTargets = GBuffer::BufferCount;
     geometryPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     geometryPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -222,6 +238,11 @@ void RenderingSystem::BuildPSOs()
     geometryPsoDesc.SampleDesc.Quality = 0;
     geometryPsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&geometryPsoDesc, IID_PPV_ARGS(&mGeometryPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC geometryWirePsoDesc = geometryPsoDesc;
+    geometryWirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    geometryWirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&geometryWirePsoDesc, IID_PPV_ARGS(&mGeometryWireframePSO)));
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC lightingPsoDesc = {};
     lightingPsoDesc.InputLayout = { nullptr, 0 };

@@ -1,10 +1,12 @@
+#include "../Common/d3dUtil.h"
+#include "FrameResource.h"
 #include "../Common/d3dApp.h"
 #include "../Common/MathHelper.h"
 #include "../Common/UploadBuffer.h"
 #include "../Common/GeometryGenerator.h"
 #include "Lights.h"
-#include "FrameResource.h"
 #include "RenderingSystem.h"
+#include <memory>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -29,6 +31,7 @@ struct RenderItem
 
     XMFLOAT4X4 World = MathHelper::Identity4x4();
     XMFLOAT4X4 TexTransform = MathHelper::Identity4x4();
+    XMFLOAT4X4 TexTransformDisp = MathHelper::Identity4x4();
     int NumFramesDirty = gNumFrameResources;
     UINT ObjCBIndex = -1;
     Material* Mat = nullptr;
@@ -125,6 +128,7 @@ private:
 
     std::map<std::string, int> mTextureCache;
     std::map<std::string, int> mMaterialToHeapIndex;
+    std::map<std::string, int> mMaterialToBumpHeapIndex;
 
     PassConstants mMainPassCB;
 
@@ -146,6 +150,9 @@ private:
     std::array<float, kDeferredPointLightCount> mFallingVelY{};
     std::array<bool, kDeferredPointLightCount> mFallingActive{};
     UINT mActivePointLights = 0;
+
+    bool mGeometryWireframe = false;
+    bool mF3KeyDown = false;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -190,17 +197,17 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     mSpotLights[0].Position = { 0.0f, 12.0f, -30.0f };
     mSpotLights[0].Direction = { 0.0f, -0.35f, 1.0f };
-    mSpotLights[0].Strength = { 1.90f, 0.15f, 0.15f };
+    mSpotLights[0].Strength = { 4.0f, 0.35f, 0.35f };
     mSpotLights[0].FalloffStart = 4.0f;
     mSpotLights[0].FalloffEnd = 65.0f;
     mSpotLights[0].SpotPower = 28.0f;
 
     mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
-    mSpotLights[1].Strength = { 1.70f, 0.12f, 0.12f };
+    mSpotLights[1].Strength = { 3.6f, 0.28f, 0.28f };
     mSpotLights[1].FalloffStart = 1.5f;
     mSpotLights[1].FalloffEnd = 70.0f;
-    mSpotLights[1].SpotPower = 34.0f;
+    mSpotLights[1].SpotPower = 96.0f;
 }
 
 CrateApp::~CrateApp()
@@ -277,6 +284,21 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
 
+    const SHORT f3State = GetAsyncKeyState(VK_F3);
+    if ((f3State & 0x8000) != 0)
+    {
+        if (!mF3KeyDown)
+        {
+            mGeometryWireframe = !mGeometryWireframe;
+            mF3KeyDown = true;
+            OutputDebugStringA(mGeometryWireframe ? "Geometry: WIREFRAME (tessellation debug)\n" : "Geometry: SOLID\n");
+        }
+    }
+    else
+    {
+        mF3KeyDown = false;
+    }
+
     if (!mFallingActive[0])
     {
         mFallingActive[0] = true;
@@ -340,7 +362,7 @@ void CrateApp::Draw(const GameTimer& gt)
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
     checkerTex.Offset(1, mCbvSrvDescriptorSize);
-    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex);
+    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex, mGeometryWireframe);
 
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
 
@@ -554,7 +576,7 @@ void CrateApp::LoadOBJModels()
 
     Assimp::Importer importer;
 
-    const aiScene* scene = importer.ReadFile("../Models/sponza/sponza.obj",
+    const aiScene* scene = importer.ReadFile("../Models/sponza1/sponza.obj",
         aiProcess_Triangulate |
         aiProcess_FlipUVs |
         aiProcess_GenNormals |
@@ -566,7 +588,6 @@ void CrateApp::LoadOBJModels()
         error += importer.GetErrorString();
         error += "\n";
         OutputDebugStringA(error.c_str());
-        CreateBoxGeometry();
         return;
     }
 
@@ -583,6 +604,7 @@ void CrateApp::LoadOBJModels()
     OutputDebugStringA(msg);
 
     std::map<std::string, std::string> materialToTexture;
+    std::map<std::string, std::string> materialToBump;
     for (unsigned int m = 0; m < scene->mNumMaterials; ++m)
     {
         aiMaterial* material = scene->mMaterials[m];
@@ -596,13 +618,27 @@ void CrateApp::LoadOBJModels()
         if (material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
         {
             std::string path = texPath.C_Str();
-            std::string baseDir = "../Models/sponza/";
+            std::string baseDir = "../Models/sponza1/";
             if (!path.empty() && path[0] != '/' && path[0] != '\\' && path.find(":") == std::string::npos)
             {
                 path = baseDir + path;
             }
             std::replace(path.begin(), path.end(), '\\', '/');
             materialToTexture[name] = path;
+        }
+
+        aiString bumpPath;
+        if (material->GetTexture(aiTextureType_HEIGHT, 0, &bumpPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_NORMALS, 0, &bumpPath) == AI_SUCCESS)
+        {
+            std::string path = bumpPath.C_Str();
+            std::string baseDir = "../Models/sponza1/";
+            if (!path.empty() && path[0] != '/' && path[0] != '\\' && path.find(":") == std::string::npos)
+            {
+                path = baseDir + path;
+            }
+            std::replace(path.begin(), path.end(), '\\', '/');
+            materialToBump[name] = path;
         }
     }
 
@@ -625,6 +661,24 @@ void CrateApp::LoadOBJModels()
         else
         {
             mMaterialToHeapIndex[matName] = mTextureCache[texPath];
+        }
+    }
+
+    for (const auto& pair : materialToBump)
+    {
+        const std::string& matName = pair.first;
+        const std::string& texPath = pair.second;
+        if (mTextureCache.find(texPath) == mTextureCache.end())
+        {
+            std::string texName = "Bump_" + matName;
+            LoadModelTexture(texPath, texName, nextHeapIndex);
+            mTextureCache[texPath] = nextHeapIndex;
+            mMaterialToBumpHeapIndex[matName] = nextHeapIndex;
+            nextHeapIndex++;
+        }
+        else
+        {
+            mMaterialToBumpHeapIndex[matName] = mTextureCache[texPath];
         }
     }
 
@@ -798,7 +852,7 @@ void CrateApp::BuildDescriptorHeaps()
 {
     OutputDebugStringA("Building descriptor heap...\n");
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = 50;
+    srvHeapDesc.NumDescriptors = 256;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -894,6 +948,7 @@ void CrateApp::BuildMaterials()
     woodCrate->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
     woodCrate->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
     woodCrate->Roughness = 0.2f;
+    woodCrate->TessellationParams = XMFLOAT4(0.0f, 0.0f, 80.0f, 0.0f);
     mMaterials["woodCrate"] = std::move(woodCrate);
 
     for (const auto& entry : mMaterialToHeapIndex)
@@ -904,15 +959,40 @@ void CrateApp::BuildMaterials()
         auto material = std::make_unique<Material>();
         material->Name = matName;
         material->MatCBIndex = (int)mMaterials.size();
-        material->DiffuseSrvHeapIndex = heapIndex;
+        if (matName == "floor")
+        {
+            material->DiffuseSrvHeapIndex = heapIndex;
+            material->DiffuseSrvHeapIndex2 = 1;
+            auto bumpIt = mMaterialToBumpHeapIndex.find(matName);
+            material->NormalSrvHeapIndex = bumpIt != mMaterialToBumpHeapIndex.end() ? bumpIt->second : heapIndex;
+            material->ChessboardParams = XMFLOAT4(6.0f, 6.0f, 1.0f, 0.0f);
+        }
+        else
+        {
+            material->DiffuseSrvHeapIndex = heapIndex;
+            auto bumpIt = mMaterialToBumpHeapIndex.find(matName);
+            material->NormalSrvHeapIndex = bumpIt != mMaterialToBumpHeapIndex.end() ? bumpIt->second : heapIndex;
+            material->DiffuseSrvHeapIndex2 = -1;
+            material->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
         material->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
         material->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
         material->Roughness = 0.2f;
+        if (matName.find("floor") != std::string::npos ||
+            matName.find("bricks") != std::string::npos ||
+            matName.find("lion") != std::string::npos)
+        {
+            material->TessellationParams = XMFLOAT4(0.12f, -0.06f, 90.0f, 1.0f);
+        }
+        else
+        {
+            material->TessellationParams = XMFLOAT4(0.0f, 0.0f, 80.0f, 0.0f);
+        }
 
         mMaterials[matName] = std::move(material);
 
         char msg[256];
-        sprintf_s(msg, "Created material %s with texture index %d\n", matName.c_str(), heapIndex);
+        sprintf_s(msg, "Created material %s diffuse %d\n", matName.c_str(), heapIndex);
         OutputDebugStringA(msg);
     }
 
@@ -924,6 +1004,19 @@ void CrateApp::BuildRenderItems()
     OutputDebugStringA("\n========================================\n");
     OutputDebugStringA("Building render items...\n");
     OutputDebugStringA("========================================\n");
+
+    auto initTexTransforms = [](RenderItem* ri)
+    {
+        XMMATRIX scale = XMMatrixScaling(ri->TextureScaleU, ri->TextureScaleV, 1.0f);
+        XMMATRIX translation = XMMatrixTranslation(ri->TextureOffsetU, ri->TextureOffsetV, 0.0f);
+        XMMATRIX texTransform = scale * translation;
+        XMStoreFloat4x4(&ri->TexTransform, texTransform);
+        if (ri->AnimateTexture)
+            XMStoreFloat4x4(&ri->TexTransformDisp, scale);
+        else
+            XMStoreFloat4x4(&ri->TexTransformDisp, texTransform);
+        ri->NumFramesDirty = gNumFrameResources;
+    };
 
     auto geo = mGeometries["Sponza"].get();
     if (!geo)
@@ -979,7 +1072,7 @@ void CrateApp::BuildRenderItems()
         }
 
         renderItem->Geo = geo;
-        renderItem->PrimitiveType = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        renderItem->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
         renderItem->IndexCount = drawArg->second.IndexCount;
         renderItem->StartIndexLocation = drawArg->second.StartIndexLocation;
         renderItem->BaseVertexLocation = drawArg->second.BaseVertexLocation;
@@ -993,6 +1086,7 @@ void CrateApp::BuildRenderItems()
         renderItem->TextureScaleU = 2.0f;
         renderItem->TextureScaleV = 2.0f;
 
+        initTexTransforms(renderItem.get());
         mAllRitems.push_back(std::move(renderItem));
     }
 
@@ -1026,11 +1120,18 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
 
         CD3DX12_GPU_DESCRIPTOR_HANDLE tex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
         tex.Offset(ri->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE nrm(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        nrm.Offset(ri->Mat->NormalSrvHeapIndex >= 0 ? ri->Mat->NormalSrvHeapIndex : ri->Mat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE texB(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        const int altIdx = ri->Mat->DiffuseSrvHeapIndex2 >= 0 ? ri->Mat->DiffuseSrvHeapIndex2 : ri->Mat->DiffuseSrvHeapIndex;
+        texB.Offset(altIdx, mCbvSrvDescriptorSize);
 
         D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
         D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
 
         cmdList->SetGraphicsRootDescriptorTable(0, tex);
+        cmdList->SetGraphicsRootDescriptorTable(4, nrm);
+        cmdList->SetGraphicsRootDescriptorTable(5, texB);
         cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
         cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
 
@@ -1070,6 +1171,7 @@ void CrateApp::AnimateMaterials(const GameTimer& gt)
             XMMATRIX translation = XMMatrixTranslation(e->TextureOffsetU, e->TextureOffsetV, 0.0f);
             XMMATRIX texTransform = scale * translation;
             XMStoreFloat4x4(&e->TexTransform, texTransform);
+            XMStoreFloat4x4(&e->TexTransformDisp, scale);
             e->NumFramesDirty = gNumFrameResources;
         }
     }
@@ -1084,10 +1186,12 @@ void CrateApp::UpdateObjectCBs(const GameTimer& gt)
         {
             XMMATRIX world = XMLoadFloat4x4(&e->World);
             XMMATRIX texTransform = XMLoadFloat4x4(&e->TexTransform);
+            XMMATRIX texTransformDisp = XMLoadFloat4x4(&e->TexTransformDisp);
 
             ObjectConstants objConstants;
             XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));
             XMStoreFloat4x4(&objConstants.TexTransform, XMMatrixTranspose(texTransform));
+            XMStoreFloat4x4(&objConstants.TexTransformDisp, XMMatrixTranspose(texTransformDisp));
 
             currObjectCB->CopyData(e->ObjCBIndex, objConstants);
             e->NumFramesDirty--;
@@ -1110,6 +1214,8 @@ void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
             matConstants.FresnelR0 = mat->FresnelR0;
             matConstants.Roughness = mat->Roughness;
             XMStoreFloat4x4(&matConstants.MatTransform, XMMatrixTranspose(matTransform));
+            matConstants.TessellationParams = mat->TessellationParams;
+            matConstants.ChessboardParams = mat->ChessboardParams;
 
             currMaterialCB->CopyData(mat->MatCBIndex, matConstants);
             mat->NumFramesDirty--;
