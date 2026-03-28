@@ -1,3 +1,4 @@
+// Проход прозрачной воды после deferred: один RT (back buffer), alpha blend, depth test.
 #define MaxLights 16
 
 Texture2D gDiffuseMap : register(t0);
@@ -73,13 +74,15 @@ struct DsOut
     float3 PosV : POSITION1;
 };
 
-struct GBufferOut
+float WaterWaveHeight(float2 xz, float t)
 {
-    float4 Albedo : SV_Target0;
-    float4 Normal : SV_Target1;
-    float4 Material : SV_Target2;
-    float4 Position : SV_Target3;
-};
+    float2 w = max(gChessboard.xy, float2(0.01f, 0.01f));
+    float2 p = xz * float2(0.06f, 0.06f) * w;
+    float h = sin(p.x * 2.2f + t * 1.1f) * cos(p.y * 1.9f + t * 0.85f);
+    h += 0.35f * sin(dot(p, float2(1.1f, -0.9f)) * 2.5f + t * 1.4f);
+    h += 0.2f * sin(length(p * 1.3f) * 3.0f - t * 1.9f);
+    return h * gTessParams.x;
+}
 
 VsOut VS(VertexIn vin)
 {
@@ -136,8 +139,7 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
     float2 uv = p[0].TexC * bary.x + p[1].TexC * bary.y + p[2].TexC * bary.z;
     float2 uvDisp = p[0].TexCDisp * bary.x + p[1].TexCDisp * bary.y + p[2].TexCDisp * bary.z;
 
-    float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
-    float disp = h * gTessParams.x + gTessParams.y;
+    float disp = WaterWaveHeight(posW.xz, gTotalTime);
     posW += normalW * disp;
 
     float4 posW4 = float4(posW, 1.0f);
@@ -150,45 +152,53 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
     return o;
 }
 
-GBufferOut PS(DsOut pin)
+// Совпадает с mDirectionalLights[0] в CrateApp (мировое направление «на сцену»)
+static const float3 kSunDirW = float3(0.45f, -0.72f, 0.52f);
+static const float3 kSunStrength = float3(0.20f, 0.35f, 1.40f);
+
+float4 WaterPS(DsOut pin) : SV_Target
 {
-    GBufferOut gout;
-    float3 normal = normalize(pin.NormalW);
+    const float eps = 0.06f;
+    float2 xz = pin.PosW.xz;
+    float t = gTotalTime;
+    float h0 = WaterWaveHeight(xz, t);
+    float hx = WaterWaveHeight(xz + float2(eps, 0.0f), t);
+    float hz = WaterWaveHeight(xz + float2(0.0f, eps), t);
+    float3 nW = normalize(float3(-(hx - h0) / eps, 1.0f, -(hz - h0) / eps));
 
-    float2 uvD = pin.TexCDisp;
-    float2 texel = 1.0f / float2(2048.0f, 2048.0f);
-    float hL = gHeightNormalMap.Sample(gsamLinear, uvD + float2(-texel.x, 0)).r;
-    float hR = gHeightNormalMap.Sample(gsamLinear, uvD + float2(texel.x, 0)).r;
-    float hD = gHeightNormalMap.Sample(gsamLinear, uvD + float2(0, -texel.y)).r;
-    float hU = gHeightNormalMap.Sample(gsamLinear, uvD + float2(0, texel.y)).r;
-    float bumpStrength = max(abs(gTessParams.x) * 40.0f, 1.0f);
-    float3 nTS = normalize(float3((hL - hR) * bumpStrength, (hD - hU) * bumpStrength, 1.0f));
+    float3 L = normalize(-kSunDirW);
+    float3 V = normalize(gEyePosW - pin.PosW);
+    float NdotL = saturate(dot(nW, L));
+    float NdotV = saturate(dot(nW, V));
+    float3 H = normalize(L + V);
+    float NdotH = saturate(dot(nW, H));
 
-    float3 up = abs(normal.y) < 0.95f ? float3(0, 1, 0) : float3(1, 0, 0);
-    float3 tangentW = normalize(cross(up, normal));
-    float3 bitangentW = normalize(cross(normal, tangentW));
-    float3 bumped = normalize(tangentW * nTS.x + bitangentW * nTS.y + normal * nTS.z);
+    float3 base = float3(0.1f, 0.36f, 0.48f) * gDiffuseAlbedo.rgb;
+    float3 diffuse = base * (gAmbientLight.rgb + kSunStrength * NdotL);
 
-    float4 albedo;
-    if (gChessboard.z > 0.5f)
-    {
-        float2 tileCount = max(gChessboard.xy, float2(1.0f, 1.0f));
-        float2 uvScaled = pin.TexC * tileCount;
-        float2 tileId = floor(uvScaled);
-        float2 localUV = frac(uvScaled);
-        int2 ti = int2(tileId);
-        float4 c0 = gDiffuseMap.Sample(gsamLinear, localUV) * gDiffuseAlbedo;
-        float4 c1 = gDiffuseMapB.Sample(gsamLinear, localUV) * gDiffuseAlbedo;
-        bool useB = ((ti.x + ti.y) & 1) != 0;
-        albedo = useB ? c1 : c0;
-    }
-    else
-    {
-        albedo = gDiffuseMap.Sample(gsamLinear, pin.TexC) * gDiffuseAlbedo;
-    }
-    gout.Albedo = albedo;
-    gout.Normal = float4(bumped * 0.5f + 0.5f, 1.0f);
-    gout.Material = float4(gFresnelR0, saturate(gRoughness));
-    gout.Position = float4(pin.PosV, 1.0f);
-    return gout;
+    // Френель: к краю воды сильнее «стеклянный» блик и отражение неба
+    float F0 = 0.02f;
+    float F = F0 + (1.0f - F0) * pow(1.0f - NdotV, 5.0f);
+
+    // Ложное отражение неба по вектору отражения (волны крутят нормаль — блики «ездят»)
+    float3 R = reflect(-V, nW);
+    float skyGrad = saturate(R.y * 0.5f + 0.5f);
+    float3 skyZenith = float3(0.5f, 0.68f, 0.95f);
+    float3 skyHorizon = float3(0.32f, 0.42f, 0.52f);
+    float3 skyCol = lerp(skyHorizon, skyZenith, pow(skyGrad, 0.65f));
+    float3 reflSky = skyCol * F * 0.9f;
+
+    // Солнечные блики: широкий блеск + узкое пятно + очень острое «зерно»
+    float rough = max(gRoughness, 0.02f);
+    float specWide = pow(NdotH, lerp(96.0f, 24.0f, rough));
+    float specMid = pow(NdotH, 256.0f);
+    float specSharp = pow(NdotH, 1024.0f);
+    float3 sunSpec = kSunStrength * F * (specWide * 0.12f + specMid * 0.35f + specSharp * 0.55f);
+    sunSpec += kSunStrength * pow(NdotH, 2048.0f) * 0.25f;
+
+    float3 matSpec = gFresnelR0 * specWide * 2.0f;
+
+    float3 rgb = diffuse + reflSky + sunSpec + matSpec;
+    const float alpha = 0.42f;
+    return float4(rgb, alpha);
 }

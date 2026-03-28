@@ -191,6 +191,11 @@ void RenderingSystem::BuildShadersAndInputLayout()
     mShaders["deferredLightVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["deferredLightPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "PS", "ps_5_0");
 
+    mShaders["waterTransparentVS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["waterTransparentHS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "HS", "hs_5_0");
+    mShaders["waterTransparentDS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "DS", "ds_5_0");
+    mShaders["waterTransparentPS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "WaterPS", "ps_5_0");
+
     mInputLayout =
     {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -270,4 +275,63 @@ void RenderingSystem::BuildPSOs()
     lightingPsoDesc.SampleDesc.Quality = 0;
     lightingPsoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&lightingPsoDesc, IID_PPV_ARGS(&mLightingPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC waterPsoDesc = {};
+    waterPsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+    waterPsoDesc.pRootSignature = mGeometryRootSignature.Get();
+    waterPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["waterTransparentVS"]->GetBufferPointer()),
+        mShaders["waterTransparentVS"]->GetBufferSize()
+    };
+    waterPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["waterTransparentPS"]->GetBufferPointer()),
+        mShaders["waterTransparentPS"]->GetBufferSize()
+    };
+    waterPsoDesc.HS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["waterTransparentHS"]->GetBufferPointer()),
+        mShaders["waterTransparentHS"]->GetBufferSize()
+    };
+    waterPsoDesc.DS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["waterTransparentDS"]->GetBufferPointer()),
+        mShaders["waterTransparentDS"]->GetBufferSize()
+    };
+    waterPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    waterPsoDesc.BlendState.AlphaToCoverageEnable = FALSE;
+    waterPsoDesc.BlendState.IndependentBlendEnable = FALSE;
+    waterPsoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+    waterPsoDesc.BlendState.RenderTarget[0].LogicOpEnable = FALSE;
+    waterPsoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    waterPsoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPsoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    waterPsoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    waterPsoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    waterPsoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    waterPsoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    waterPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    waterPsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    waterPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    waterPsoDesc.SampleMask = UINT_MAX;
+    waterPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+    waterPsoDesc.NumRenderTargets = 1;
+    waterPsoDesc.RTVFormats[0] = mBackBufferFormat;
+    waterPsoDesc.SampleDesc.Count = 1;
+    waterPsoDesc.SampleDesc.Quality = 0;
+    waterPsoDesc.DSVFormat = mDepthStencilFormat;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&waterPsoDesc, IID_PPV_ARGS(&mWaterTransparentPSO)));
+}
+
+void RenderingSystem::BeginTransparentWaterPass(
+    ID3D12GraphicsCommandList* cmdList,
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv,
+    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress)
+{
+    cmdList->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsv);
+    cmdList->SetPipelineState(mWaterTransparentPSO.Get());
+    cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
+    cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
 }

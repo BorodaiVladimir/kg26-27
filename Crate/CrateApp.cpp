@@ -90,6 +90,7 @@ private:
     void BuildRenderItems();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
+    void CreateWaterPlaneGeometry();
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
@@ -116,6 +117,7 @@ private:
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mOpaqueRitems;
+    std::vector<RenderItem*> mWaterRitems;
 
     struct LoadedModel
     {
@@ -228,6 +230,7 @@ bool CrateApp::Initialize()
     LoadTextures();
     BuildDescriptorHeaps();
     LoadOBJModels();
+    CreateWaterPlaneGeometry();
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -382,6 +385,20 @@ void CrateApp::Draw(const GameTimer& gt)
         kDeferredTotalLightCount,
         sizeof(DeferredLightGpu));
 
+    if (!mWaterRitems.empty())
+    {
+        // ExecuteLightingPass переключает кучу на SRV G-buffer; текстуры для воды — в mSrvDescriptorHeap
+        ID3D12DescriptorHeap* srvHeap[] = { mSrvDescriptorHeap.Get() };
+        mCommandList->SetDescriptorHeaps(1, srvHeap);
+
+        mRenderingSystem->BeginTransparentWaterPass(
+            mCommandList.Get(),
+            CurrentBackBufferView(),
+            DepthStencilView(),
+            passAddress);
+        DrawRenderItems(mCommandList.Get(), mWaterRitems);
+    }
+
     transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     mCommandList->ResourceBarrier(1, &transition);
@@ -443,6 +460,54 @@ void CrateApp::CreateBoxGeometry()
     geo->DrawArgs["box"] = submesh;
 
     mGeometries[geo->Name] = std::move(geo);
+}
+
+void CrateApp::CreateWaterPlaneGeometry()
+{
+    GeometryGenerator geoGen;
+    GeometryGenerator::MeshData grid = geoGen.CreateGrid(120.0f, 120.0f, 56, 56);
+
+    std::vector<Vertex> vertices(grid.Vertices.size());
+    for (size_t i = 0; i < grid.Vertices.size(); ++i)
+    {
+        vertices[i].Pos = grid.Vertices[i].Position;
+        vertices[i].Normal = grid.Vertices[i].Normal;
+        vertices[i].TexC = grid.Vertices[i].TexC;
+    }
+
+    std::vector<std::uint32_t> indices = grid.Indices32;
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = "WaterPlane";
+
+    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint32_t);
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+    geo->DrawArgs["water"] = submesh;
+
+    mGeometries[geo->Name] = std::move(geo);
+    OutputDebugStringA("Water plane geometry created\n");
 }
 
 void CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex)
@@ -996,6 +1061,19 @@ void CrateApp::BuildMaterials()
         OutputDebugStringA(msg);
     }
 
+    auto water = std::make_unique<Material>();
+    water->Name = "water";
+    water->MatCBIndex = (int)mMaterials.size();
+    water->DiffuseSrvHeapIndex = 0;
+    water->DiffuseSrvHeapIndex2 = 0;
+    water->NormalSrvHeapIndex = 0;
+    water->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+    water->FresnelR0 = XMFLOAT3(0.06f, 0.1f, 0.14f);
+    water->Roughness = 0.04f;
+    water->TessellationParams = XMFLOAT4(0.35f, 0.0f, 140.0f, 1.0f);
+    water->ChessboardParams = XMFLOAT4(1.2f, 1.2f, 0.0f, 1.0f);
+    mMaterials["water"] = std::move(water);
+
     OutputDebugStringA("Materials built\n");
 }
 
@@ -1090,8 +1168,41 @@ void CrateApp::BuildRenderItems()
         mAllRitems.push_back(std::move(renderItem));
     }
 
+    {
+        auto waterGeo = mGeometries["WaterPlane"].get();
+        auto waterMatIt = mMaterials.find("water");
+        if (waterGeo && waterMatIt != mMaterials.end())
+        {
+            auto waterRi = std::make_unique<RenderItem>();
+            waterRi->ObjCBIndex = objIndex++;
+            waterRi->Mat = waterMatIt->second.get();
+            waterRi->Geo = waterGeo;
+            waterRi->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+            auto drawArg = waterGeo->DrawArgs.find("water");
+            if (drawArg != waterGeo->DrawArgs.end())
+            {
+                waterRi->IndexCount = drawArg->second.IndexCount;
+                waterRi->StartIndexLocation = drawArg->second.StartIndexLocation;
+                waterRi->BaseVertexLocation = drawArg->second.BaseVertexLocation;
+            }
+            XMMATRIX scale = XMMatrixScaling(1.0f, 1.0f, 1.0f);
+            XMMATRIX translation = XMMatrixTranslation(0.0f, -2.5f, 0.0f);
+            XMStoreFloat4x4(&waterRi->World, scale * translation);
+            waterRi->AnimateTexture = false;
+            waterRi->TextureScaleU = 1.0f;
+            waterRi->TextureScaleV = 1.0f;
+            initTexTransforms(waterRi.get());
+            mAllRitems.push_back(std::move(waterRi));
+        }
+    }
+
     for (auto& e : mAllRitems)
-        mOpaqueRitems.push_back(e.get());
+    {
+        if (e->Mat && e->Mat->Name == "water")
+            mWaterRitems.push_back(e.get());
+        else
+            mOpaqueRitems.push_back(e.get());
+    }
 
     sprintf_s(msg, "Total render items: %zu\n", mAllRitems.size());
     OutputDebugStringA(msg);
