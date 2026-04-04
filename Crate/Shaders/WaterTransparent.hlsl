@@ -1,4 +1,3 @@
-// Проход прозрачной воды после deferred: один RT (back buffer), alpha blend, depth test.
 #define MaxLights 16
 
 Texture2D gDiffuseMap : register(t0);
@@ -152,7 +151,6 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
     return o;
 }
 
-// Совпадает с mDirectionalLights[0] в CrateApp (мировое направление «на сцену»)
 static const float3 kSunDirW = float3(0.45f, -0.72f, 0.52f);
 static const float3 kSunStrength = float3(0.20f, 0.35f, 1.40f);
 

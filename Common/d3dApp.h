@@ -61,6 +61,8 @@ protected:
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView()const;
 
 	void CalculateFrameStats();
+	// Дополнение к заголовку окна (FPS/mspf), по умолчанию пусто.
+	virtual std::wstring GetFrameStatsExtra() const { return L""; }
 
     void LogAdapters();
     void LogAdapterOutputs(IDXGIAdapter* adapter);

@@ -160,6 +160,7 @@
     <ClCompile Include="CrateApp.cpp" />
     <ClCompile Include="FrameResource.cpp" />
     <ClCompile Include="GBuffer.cpp" />
+    <ClCompile Include="KdTree.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -174,6 +175,7 @@
     <ClInclude Include="FrameResource.h" />
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="Lights.h" />
+    <ClInclude Include="KdTree.h" />
     <ClInclude Include="RenderingSystem.h" />
   </ItemGroup>
   <ItemGroup>

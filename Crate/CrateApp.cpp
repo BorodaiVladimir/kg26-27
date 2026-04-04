@@ -6,7 +6,10 @@
 #include "../Common/GeometryGenerator.h"
 #include "Lights.h"
 #include "RenderingSystem.h"
+#include "KdTree.h"
+#include <DirectXCollision.h>
 #include <memory>
+#include <random>
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -46,6 +49,7 @@ struct RenderItem
     float TextureScaleV = 1.0f;
     bool AnimateTexture = false;
     XMFLOAT2 AnimationSpeed = { 0.0f, 0.0f };
+    bool IsStressObject = false;
 };
 
 struct SubmeshData
@@ -65,6 +69,8 @@ public:
     virtual bool Initialize() override;
 
 private:
+    std::wstring GetFrameStatsExtra() const override;
+
     virtual void OnResize() override;
     virtual void Update(const GameTimer& gt) override;
     virtual void Draw(const GameTimer& gt) override;
@@ -91,6 +97,8 @@ private:
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
+    void BuildStressTestObjects(int& objIndex);
+    void UpdateStressVisibility();
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
@@ -116,8 +124,18 @@ private:
     std::unique_ptr<RenderingSystem> mRenderingSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
-    std::vector<RenderItem*> mOpaqueRitems;
+    std::vector<RenderItem*> mSponzaOpaqueRitems;
+    std::vector<RenderItem*> mStressRitems;
+    std::vector<DirectX::BoundingBox> mStressWorldBounds;
+    std::vector<RenderItem*> mStressVisibleRitems;
+    KdTree mKdTree;
+
     std::vector<RenderItem*> mWaterRitems;
+
+    bool mFrustumCullEnabled = true;
+    bool mKdTreeCullingEnabled = true;
+    bool mF4KeyDown = false;
+    bool mF5KeyDown = false;
 
     struct LoadedModel
     {
@@ -180,6 +198,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
 CrateApp::CrateApp(HINSTANCE hInstance)
     : D3DApp(hInstance)
 {
+    mMainWndCaption = L"Crate DX12";
     mTheta = 1.3f * XM_PI;
     mPhi = 0.4f * XM_PI;
     mRadius = 8.0f;
@@ -218,6 +237,19 @@ CrateApp::~CrateApp()
         FlushCommandQueue();
 }
 
+std::wstring CrateApp::GetFrameStatsExtra() const
+{
+    wchar_t buf[320];
+    swprintf_s(
+        buf,
+        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s",
+        mStressVisibleRitems.size(),
+        mStressRitems.size(),
+        mFrustumCullEnabled ? L"on" : L"off",
+        mKdTreeCullingEnabled ? L"on" : L"off");
+    return buf;
+}
+
 bool CrateApp::Initialize()
 {
     if (!D3DApp::Initialize())
@@ -231,6 +263,7 @@ bool CrateApp::Initialize()
     BuildDescriptorHeaps();
     LoadOBJModels();
     CreateWaterPlaneGeometry();
+    CreateBoxGeometry();
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
@@ -294,12 +327,46 @@ void CrateApp::Update(const GameTimer& gt)
         {
             mGeometryWireframe = !mGeometryWireframe;
             mF3KeyDown = true;
-            OutputDebugStringA(mGeometryWireframe ? "Geometry: WIREFRAME (tessellation debug)\n" : "Geometry: SOLID\n");
+            OutputDebugStringA(mGeometryWireframe ? "Geometry + water: WIREFRAME (tessellation debug)\n" : "Geometry + water: SOLID\n");
         }
     }
     else
     {
         mF3KeyDown = false;
+    }
+
+    const SHORT f4State = GetAsyncKeyState(VK_F4);
+    if ((f4State & 0x8000) != 0)
+    {
+        if (!mF4KeyDown)
+        {
+            mFrustumCullEnabled = !mFrustumCullEnabled;
+            mF4KeyDown = true;
+            char buf[128];
+            sprintf_s(buf, "Frustum culling: %s\n", mFrustumCullEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF4KeyDown = false;
+    }
+
+    const SHORT f5State = GetAsyncKeyState(VK_F5);
+    if ((f5State & 0x8000) != 0)
+    {
+        if (!mF5KeyDown)
+        {
+            mKdTreeCullingEnabled = !mKdTreeCullingEnabled;
+            mF5KeyDown = true;
+            char buf[128];
+            sprintf_s(buf, "KD-tree for culling: %s\n", mKdTreeCullingEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF5KeyDown = false;
     }
 
     if (!mFallingActive[0])
@@ -360,6 +427,8 @@ void CrateApp::Draw(const GameTimer& gt)
     ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
     mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
 
+    UpdateStressVisibility();
+
     auto passCB = mCurrFrameResource->PassCB->Resource();
     auto passAddress = passCB->GetGPUVirtualAddress();
 
@@ -367,7 +436,8 @@ void CrateApp::Draw(const GameTimer& gt)
     checkerTex.Offset(1, mCbvSrvDescriptorSize);
     mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex, mGeometryWireframe);
 
-    DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+    DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
+    DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
 
     mRenderingSystem->EndGeometryPass(mCommandList.Get());
 
@@ -395,7 +465,8 @@ void CrateApp::Draw(const GameTimer& gt)
             mCommandList.Get(),
             CurrentBackBufferView(),
             DepthStencilView(),
-            passAddress);
+            passAddress,
+            mGeometryWireframe);
         DrawRenderItems(mCommandList.Get(), mWaterRitems);
     }
 
@@ -1168,6 +1239,8 @@ void CrateApp::BuildRenderItems()
         mAllRitems.push_back(std::move(renderItem));
     }
 
+    BuildStressTestObjects(objIndex);
+
     {
         auto waterGeo = mGeometries["WaterPlane"].get();
         auto waterMatIt = mMaterials.find("water");
@@ -1196,12 +1269,19 @@ void CrateApp::BuildRenderItems()
         }
     }
 
+    mSponzaOpaqueRitems.clear();
+    mStressRitems.clear();
+    mWaterRitems.clear();
     for (auto& e : mAllRitems)
     {
-        if (e->Mat && e->Mat->Name == "water")
+        if (!e->Mat)
+            continue;
+        if (e->Mat->Name == "water")
             mWaterRitems.push_back(e.get());
+        else if (e->IsStressObject)
+            mStressRitems.push_back(e.get());
         else
-            mOpaqueRitems.push_back(e.get());
+            mSponzaOpaqueRitems.push_back(e.get());
     }
 
     sprintf_s(msg, "Total render items: %zu\n", mAllRitems.size());
@@ -1209,6 +1289,129 @@ void CrateApp::BuildRenderItems()
     OutputDebugStringA("========================================\n");
     OutputDebugStringA("Render items built\n");
     OutputDebugStringA("========================================\n\n");
+}
+
+void CrateApp::BuildStressTestObjects(int& objIndex)
+{
+    auto boxGeoIt = mGeometries.find("BoxGeo");
+    auto matIt = mMaterials.find("woodCrate");
+    if (boxGeoIt == mGeometries.end() || matIt == mMaterials.end())
+    {
+        OutputDebugStringA("BuildStressTestObjects: BoxGeo or woodCrate missing\n");
+        return;
+    }
+
+    MeshGeometry* boxGeo = boxGeoIt->second.get();
+    Material* mat = matIt->second.get();
+    auto drawArg = boxGeo->DrawArgs.find("box");
+    if (drawArg == boxGeo->DrawArgs.end())
+        return;
+
+    constexpr int kStressTestCount = 5000;
+    mStressWorldBounds.clear();
+    mStressWorldBounds.reserve(kStressTestCount);
+
+    std::mt19937 rng(12345u);
+    std::uniform_real_distribution<float> distX(-38.0f, 38.0f);
+    std::uniform_real_distribution<float> distZ(-38.0f, 38.0f);
+    std::uniform_real_distribution<float> distY(0.35f, 8.0f);
+
+    BoundingBox unitBox;
+    BoundingBox::CreateFromPoints(
+        unitBox,
+        XMVectorSet(-0.5f, -0.5f, -0.5f, 1.0f),
+        XMVectorSet(0.5f, 0.5f, 0.5f, 1.0f));
+
+    auto initTexTransforms = [](RenderItem* ri) {
+        XMMATRIX scale = XMMatrixScaling(ri->TextureScaleU, ri->TextureScaleV, 1.0f);
+        XMMATRIX translation = XMMatrixTranslation(ri->TextureOffsetU, ri->TextureOffsetV, 0.0f);
+        XMMATRIX texTransform = scale * translation;
+        XMStoreFloat4x4(&ri->TexTransform, texTransform);
+        XMStoreFloat4x4(&ri->TexTransformDisp, texTransform);
+        ri->NumFramesDirty = gNumFrameResources;
+    };
+
+    const float boxScale = 0.32f;
+
+    for (int i = 0; i < kStressTestCount; ++i)
+    {
+        const float x = distX(rng);
+        const float y = distY(rng);
+        const float z = distZ(rng);
+        const XMMATRIX world = XMMatrixScaling(boxScale, boxScale, boxScale) * XMMatrixTranslation(x, y, z);
+
+        XMFLOAT4X4 worldStore;
+        XMStoreFloat4x4(&worldStore, world);
+
+        BoundingBox worldBB;
+        unitBox.Transform(worldBB, world);
+
+        auto ri = std::make_unique<RenderItem>();
+        ri->ObjCBIndex = objIndex++;
+        ri->Mat = mat;
+        ri->Geo = boxGeo;
+        ri->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+        ri->IndexCount = drawArg->second.IndexCount;
+        ri->StartIndexLocation = drawArg->second.StartIndexLocation;
+        ri->BaseVertexLocation = drawArg->second.BaseVertexLocation;
+        ri->World = worldStore;
+        ri->IsStressObject = true;
+        ri->AnimateTexture = false;
+        ri->TextureScaleU = 1.0f;
+        ri->TextureScaleV = 1.0f;
+        initTexTransforms(ri.get());
+
+        mStressWorldBounds.push_back(worldBB);
+        mAllRitems.push_back(std::move(ri));
+    }
+
+    if (mStressWorldBounds.empty())
+        return;
+
+    mKdTree.Build(mStressWorldBounds);
+
+    char msg[256];
+    sprintf_s(msg, "Stress test: %d boxes, kd-tree built\n", kStressTestCount);
+    OutputDebugStringA(msg);
+}
+
+void CrateApp::UpdateStressVisibility()
+{
+    mStressVisibleRitems.clear();
+    if (mStressRitems.empty())
+        return;
+
+    if (!mFrustumCullEnabled)
+    {
+        mStressVisibleRitems = mStressRitems;
+        return;
+    }
+
+    const XMMATRIX view = XMLoadFloat4x4(&mView);
+    const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+
+    BoundingFrustum fr;
+    BoundingFrustum::CreateFromMatrix(fr, proj);
+
+    if (!mKdTreeCullingEnabled)
+    {
+        mStressVisibleRitems.reserve(mStressRitems.size());
+        for (size_t i = 0; i < mStressRitems.size(); ++i)
+        {
+            if (FrustumContainsOrIntersectsAABB(fr, view, mStressWorldBounds[i]))
+                mStressVisibleRitems.push_back(mStressRitems[i]);
+        }
+        return;
+    }
+
+    std::vector<int> visibleIds;
+    mKdTree.QueryVisible(mStressWorldBounds, fr, view, visibleIds);
+    mStressVisibleRitems.reserve(visibleIds.size());
+    for (int id : visibleIds)
+    {
+        if (id >= 0 && static_cast<size_t>(id) < mStressRitems.size())
+            mStressVisibleRitems.push_back(mStressRitems[static_cast<size_t>(id)]);
+    }
 }
 
 void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)

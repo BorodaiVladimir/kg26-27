@@ -322,16 +322,22 @@ void RenderingSystem::BuildPSOs()
     waterPsoDesc.SampleDesc.Quality = 0;
     waterPsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&waterPsoDesc, IID_PPV_ARGS(&mWaterTransparentPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC waterWirePsoDesc = waterPsoDesc;
+    waterWirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    waterWirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&waterWirePsoDesc, IID_PPV_ARGS(&mWaterTransparentWireframePSO)));
 }
 
 void RenderingSystem::BeginTransparentWaterPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
     D3D12_CPU_DESCRIPTOR_HANDLE dsv,
-    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress)
+    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+    bool wireframe)
 {
     cmdList->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsv);
-    cmdList->SetPipelineState(mWaterTransparentPSO.Get());
+    cmdList->SetPipelineState(wireframe ? mWaterTransparentWireframePSO.Get() : mWaterTransparentPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
 }
