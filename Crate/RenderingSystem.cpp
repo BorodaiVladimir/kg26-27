@@ -21,8 +21,10 @@ void RenderingSystem::Initialize(
 
     mGBuffer.Initialize(device, width, height);
     BuildGeometryRootSignature();
+    BuildBillboardRootSignature();
     BuildLightingRootSignature();
     BuildShadersAndInputLayout();
+    BuildBillboardShadersAndLayout();
     BuildPSOs();
 }
 
@@ -143,6 +145,55 @@ void RenderingSystem::BuildGeometryRootSignature()
         IID_PPV_ARGS(mGeometryRootSignature.GetAddressOf())));
 }
 
+void RenderingSystem::BuildBillboardRootSignature()
+{
+    CD3DX12_DESCRIPTOR_RANGE texTable;
+    texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE checkerTable;
+    checkerTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    CD3DX12_DESCRIPTOR_RANGE texTableB;
+    texTableB.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+    CD3DX12_DESCRIPTOR_RANGE instanceTable;
+    instanceTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);
+
+    CD3DX12_ROOT_PARAMETER slotRootParameter[7];
+    slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[1].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+    slotRootParameter[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
+    slotRootParameter[3].InitAsConstantBufferView(2, 0, D3D12_SHADER_VISIBILITY_ALL);
+    slotRootParameter[4].InitAsDescriptorTable(1, &checkerTable, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[5].InitAsDescriptorTable(1, &texTableB, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[6].InitAsDescriptorTable(1, &instanceTable, D3D12_SHADER_VISIBILITY_VERTEX);
+
+    CD3DX12_STATIC_SAMPLER_DESC linearWrap(
+        0,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+
+    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
+        7,
+        slotRootParameter,
+        1,
+        &linearWrap,
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+    ComPtr<ID3DBlob> serializedRootSig = nullptr;
+    ComPtr<ID3DBlob> errorBlob = nullptr;
+    ThrowIfFailed(D3D12SerializeRootSignature(
+        &rootSigDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        serializedRootSig.GetAddressOf(),
+        errorBlob.GetAddressOf()));
+
+    ThrowIfFailed(mDevice->CreateRootSignature(
+        0,
+        serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(mBillboardRootSignature.GetAddressOf())));
+}
+
 void RenderingSystem::BuildLightingRootSignature()
 {
     CD3DX12_DESCRIPTOR_RANGE gbufferTable;
@@ -201,6 +252,20 @@ void RenderingSystem::BuildShadersAndInputLayout()
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+    };
+}
+
+void RenderingSystem::BuildBillboardShadersAndLayout()
+{
+    mShaders["billboardTreeVS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTree.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["billboardTreePS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTree.hlsl", nullptr, "PS", "ps_5_0");
+    mShaders["billboardTreeCrossVS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTreeCross.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["billboardTreeCrossPS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTreeCross.hlsl", nullptr, "PS", "ps_5_0");
+
+    mBillboardInputLayout =
+    {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
     };
 }
 
@@ -327,6 +392,64 @@ void RenderingSystem::BuildPSOs()
     waterWirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
     waterWirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&waterWirePsoDesc, IID_PPV_ARGS(&mWaterTransparentWireframePSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC billboardPsoDesc = {};
+    billboardPsoDesc.InputLayout = { mBillboardInputLayout.data(), (UINT)mBillboardInputLayout.size() };
+    billboardPsoDesc.pRootSignature = mBillboardRootSignature.Get();
+    billboardPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["billboardTreeVS"]->GetBufferPointer()),
+        mShaders["billboardTreeVS"]->GetBufferSize()
+    };
+    billboardPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["billboardTreePS"]->GetBufferPointer()),
+        mShaders["billboardTreePS"]->GetBufferSize()
+    };
+    billboardPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    billboardPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    billboardPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    billboardPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    billboardPsoDesc.SampleMask = UINT_MAX;
+    billboardPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    billboardPsoDesc.NumRenderTargets = GBuffer::BufferCount;
+    billboardPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    billboardPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    billboardPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    billboardPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    billboardPsoDesc.SampleDesc.Count = 1;
+    billboardPsoDesc.SampleDesc.Quality = 0;
+    billboardPsoDesc.DSVFormat = mDepthStencilFormat;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&billboardPsoDesc, IID_PPV_ARGS(&mBillboardTreePSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC crossPsoDesc = {};
+    crossPsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+    crossPsoDesc.pRootSignature = mBillboardRootSignature.Get();
+    crossPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["billboardTreeCrossVS"]->GetBufferPointer()),
+        mShaders["billboardTreeCrossVS"]->GetBufferSize()
+    };
+    crossPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["billboardTreeCrossPS"]->GetBufferPointer()),
+        mShaders["billboardTreeCrossPS"]->GetBufferSize()
+    };
+    crossPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    crossPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    crossPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    crossPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    crossPsoDesc.SampleMask = UINT_MAX;
+    crossPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    crossPsoDesc.NumRenderTargets = GBuffer::BufferCount;
+    crossPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    crossPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    crossPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    crossPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    crossPsoDesc.SampleDesc.Count = 1;
+    crossPsoDesc.SampleDesc.Quality = 0;
+    crossPsoDesc.DSVFormat = mDepthStencilFormat;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&crossPsoDesc, IID_PPV_ARGS(&mBillboardCrossPSO)));
 }
 
 void RenderingSystem::BeginTransparentWaterPass(

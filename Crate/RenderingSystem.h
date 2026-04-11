@@ -42,10 +42,16 @@ public:
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
         bool wireframe);
 
+    ID3D12RootSignature* GetBillboardRootSignature() const { return mBillboardRootSignature.Get(); }
+    ID3D12PipelineState* GetBillboardTreePSO() const { return mBillboardTreePSO.Get(); }
+    ID3D12PipelineState* GetBillboardCrossPSO() const { return mBillboardCrossPSO.Get(); }
+
 private:
     void BuildGeometryRootSignature();
+    void BuildBillboardRootSignature();
     void BuildLightingRootSignature();
     void BuildShadersAndInputLayout();
+    void BuildBillboardShadersAndLayout();
     void BuildPSOs();
 
 private:
@@ -62,11 +68,15 @@ private:
 
     std::unordered_map<std::string, Microsoft::WRL::ComPtr<ID3DBlob>> mShaders;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+    std::vector<D3D12_INPUT_ELEMENT_DESC> mBillboardInputLayout;
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mGeometryRootSignature = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> mBillboardRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mLightingRootSignature = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryWireframePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mBillboardTreePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mBillboardCrossPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mWaterTransparentPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mWaterTransparentWireframePSO = nullptr;
