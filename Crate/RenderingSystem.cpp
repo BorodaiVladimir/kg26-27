@@ -259,8 +259,8 @@ void RenderingSystem::BuildBillboardShadersAndLayout()
 {
     mShaders["billboardTreeVS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTree.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["billboardTreePS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTree.hlsl", nullptr, "PS", "ps_5_0");
-    mShaders["billboardTreeCrossVS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTreeCross.hlsl", nullptr, "VS", "vs_5_0");
-    mShaders["billboardTreeCrossPS"] = d3dUtil::CompileShader(L"Shaders\\BillboardTreeCross.hlsl", nullptr, "PS", "ps_5_0");
+    mShaders["treeMeshInstancedVS"] = d3dUtil::CompileShader(L"Shaders\\TreeMeshInstanced.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["treeMeshInstancedPS"] = d3dUtil::CompileShader(L"Shaders\\TreeMeshInstanced.hlsl", nullptr, "PS", "ps_5_0");
 
     mBillboardInputLayout =
     {
@@ -422,34 +422,34 @@ void RenderingSystem::BuildPSOs()
     billboardPsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&billboardPsoDesc, IID_PPV_ARGS(&mBillboardTreePSO)));
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC crossPsoDesc = {};
-    crossPsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
-    crossPsoDesc.pRootSignature = mBillboardRootSignature.Get();
-    crossPsoDesc.VS =
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC treeMeshPsoDesc = {};
+    treeMeshPsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+    treeMeshPsoDesc.pRootSignature = mBillboardRootSignature.Get();
+    treeMeshPsoDesc.VS =
     {
-        reinterpret_cast<BYTE*>(mShaders["billboardTreeCrossVS"]->GetBufferPointer()),
-        mShaders["billboardTreeCrossVS"]->GetBufferSize()
+        reinterpret_cast<BYTE*>(mShaders["treeMeshInstancedVS"]->GetBufferPointer()),
+        mShaders["treeMeshInstancedVS"]->GetBufferSize()
     };
-    crossPsoDesc.PS =
+    treeMeshPsoDesc.PS =
     {
-        reinterpret_cast<BYTE*>(mShaders["billboardTreeCrossPS"]->GetBufferPointer()),
-        mShaders["billboardTreeCrossPS"]->GetBufferSize()
+        reinterpret_cast<BYTE*>(mShaders["treeMeshInstancedPS"]->GetBufferPointer()),
+        mShaders["treeMeshInstancedPS"]->GetBufferSize()
     };
-    crossPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-    crossPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    crossPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-    crossPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-    crossPsoDesc.SampleMask = UINT_MAX;
-    crossPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    crossPsoDesc.NumRenderTargets = GBuffer::BufferCount;
-    crossPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    crossPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    crossPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    crossPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    crossPsoDesc.SampleDesc.Count = 1;
-    crossPsoDesc.SampleDesc.Quality = 0;
-    crossPsoDesc.DSVFormat = mDepthStencilFormat;
-    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&crossPsoDesc, IID_PPV_ARGS(&mBillboardCrossPSO)));
+    treeMeshPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    treeMeshPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    treeMeshPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    treeMeshPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    treeMeshPsoDesc.SampleMask = UINT_MAX;
+    treeMeshPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    treeMeshPsoDesc.NumRenderTargets = GBuffer::BufferCount;
+    treeMeshPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    treeMeshPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    treeMeshPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    treeMeshPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    treeMeshPsoDesc.SampleDesc.Count = 1;
+    treeMeshPsoDesc.SampleDesc.Quality = 0;
+    treeMeshPsoDesc.DSVFormat = mDepthStencilFormat;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&treeMeshPsoDesc, IID_PPV_ARGS(&mTreeMeshInstancedPSO)));
 }
 
 void RenderingSystem::BeginTransparentWaterPass(
