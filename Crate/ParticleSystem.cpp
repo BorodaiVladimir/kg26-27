@@ -254,7 +254,6 @@ void ParticleSystem::BuildBuffersAndDescriptors(ID3D12GraphicsCommandList* cmdLi
     mDevice->CreateUnorderedAccessView(mAliveListA.Get(), mAliveCounterA.Get(), &idxUav, hCpu);
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListB.Get(), mAliveCounterB.Get(), &idxUav, hCpu);
-    // BA table must also start with pool at u0.
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mParticlePool.Get(), nullptr, &poolUav, hCpu);
     hCpu.Offset(1, mDescriptorSize);
@@ -348,7 +347,7 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
     mMappedConstants->EmitRate = 380.0f;
     mMappedConstants->Gravity = -9.8f;
     mMappedConstants->EmitterPos = mEmitterPos;
-    mMappedConstants->MaxLife = 3.3f;
+    mMappedConstants->MaxLife = 1.1f;
     mMappedConstants->ConsumeCount = mAliveCount;
     mMappedConstants->EmitCount = emitCount;
     mMappedConstants->MaxParticles = kMaxParticles;

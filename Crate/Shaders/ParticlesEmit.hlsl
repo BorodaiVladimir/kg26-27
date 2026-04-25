@@ -56,7 +56,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     p.Pos = gEmitterPos + float3(cos(angle) * radius, 0.0f, sin(angle) * radius);
     p.Age = 0.0f;
     p.Vel = float3(cos(angle) * 0.9f, speed, sin(angle) * 0.9f);
-    p.Life = lerp(1.2f, gMaxLife, Hash01(seed * 13u + 31u));
+    p.Life = lerp(0.6f, gMaxLife, Hash01(seed * 13u + 31u));
     p.Color = float4(1.0f, 0.7f + 0.25f * Hash01(seed * 17u), 0.3f, 1.0f);
     p.Size = lerp(0.18f, 0.42f, Hash01(seed * 19u + 41u));
     p.Pad = 0.0f.xxx;
