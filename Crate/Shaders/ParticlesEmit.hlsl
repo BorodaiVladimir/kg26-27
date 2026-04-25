@@ -50,15 +50,15 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     uint seed = i + (uint)(gTotalTime * 1000.0f) * 747796405u;
     float angle = Hash01(seed) * 6.2831853f;
     float radius = Hash01(seed * 3u + 11u) * 1.1f;
-    float speed = lerp(1.4f, 3.6f, Hash01(seed * 7u + 23u));
+    float speed = lerp(2.2f, 4.8f, Hash01(seed * 7u + 23u));
 
     Particle p;
     p.Pos = gEmitterPos + float3(cos(angle) * radius, 0.0f, sin(angle) * radius);
     p.Age = 0.0f;
     p.Vel = float3(cos(angle) * 0.9f, speed, sin(angle) * 0.9f);
-    p.Life = lerp(2.5f, gMaxLife, Hash01(seed * 13u + 31u));
-    p.Color = float4(1.0f, 0.55f + 0.35f * Hash01(seed * 17u), 0.2f, 1.0f);
-    p.Size = lerp(0.08f, 0.22f, Hash01(seed * 19u + 41u));
+    p.Life = lerp(1.2f, gMaxLife, Hash01(seed * 13u + 31u));
+    p.Color = float4(1.0f, 0.7f + 0.25f * Hash01(seed * 17u), 0.3f, 1.0f);
+    p.Size = lerp(0.18f, 0.42f, Hash01(seed * 19u + 41u));
     p.Pad = 0.0f.xxx;
 
     uint particleIndex = gDeadList.Consume();

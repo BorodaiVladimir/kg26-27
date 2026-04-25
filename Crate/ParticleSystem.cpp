@@ -10,7 +10,7 @@ namespace
 constexpr UINT kRenderSrvTable = 0;   // [pool SRV, sort SRV]
 constexpr UINT kUavTableAB = 2;       // [pool, aliveA, aliveB]
 constexpr UINT kUavTableBA = 5;       // [pool, aliveB, aliveA]
-constexpr UINT kUavDeadSort = 7;      // [dead, sort]
+constexpr UINT kUavDeadSort = 8;      // [dead, sort]
 }
 
 void ParticleSystem::Initialize(
@@ -254,6 +254,9 @@ void ParticleSystem::BuildBuffersAndDescriptors(ID3D12GraphicsCommandList* cmdLi
     mDevice->CreateUnorderedAccessView(mAliveListA.Get(), mAliveCounterA.Get(), &idxUav, hCpu);
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListB.Get(), mAliveCounterB.Get(), &idxUav, hCpu);
+    // BA table must also start with pool at u0.
+    hCpu.Offset(1, mDescriptorSize);
+    mDevice->CreateUnorderedAccessView(mParticlePool.Get(), nullptr, &poolUav, hCpu);
     hCpu.Offset(1, mDescriptorSize);
     mDevice->CreateUnorderedAccessView(mAliveListB.Get(), mAliveCounterB.Get(), &idxUav, hCpu);
     hCpu.Offset(1, mDescriptorSize);
@@ -333,7 +336,7 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
     mAliveCount = (std::min)(*mMappedAliveCount, kMaxParticles);
     const UINT freeSlots = kMaxParticles - mAliveCount;
 
-    mEmitAccumulator += dt * 260.0f;
+    mEmitAccumulator += dt * 380.0f;
     UINT emitCount = static_cast<UINT>(mEmitAccumulator);
     mEmitAccumulator -= static_cast<float>(emitCount);
     emitCount = (std::min)(emitCount, freeSlots);
@@ -342,10 +345,10 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
 
     mMappedConstants->DeltaTime = dt;
     mMappedConstants->TotalTime = totalTime;
-    mMappedConstants->EmitRate = 260.0f;
+    mMappedConstants->EmitRate = 380.0f;
     mMappedConstants->Gravity = -9.8f;
     mMappedConstants->EmitterPos = mEmitterPos;
-    mMappedConstants->MaxLife = 6.0f;
+    mMappedConstants->MaxLife = 3.3f;
     mMappedConstants->ConsumeCount = mAliveCount;
     mMappedConstants->EmitCount = emitCount;
     mMappedConstants->MaxParticles = kMaxParticles;

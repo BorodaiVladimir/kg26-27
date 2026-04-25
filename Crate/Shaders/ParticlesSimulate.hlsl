@@ -49,6 +49,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     p.Vel += float3(0.0f, gGravity, 0.0f) * gDeltaTime;
     p.Pos += p.Vel * gDeltaTime;
     p.Color.a = saturate(1.0f - p.Age / max(p.Life, 1e-4f));
+    float prevRemaining = max(p.Life - (p.Age - gDeltaTime), 1e-4f);
+    float remaining = max(p.Life - p.Age, 0.0f);
+    p.Size *= remaining / prevRemaining;
 
     gParticlePool[idx] = p;
     gAliveOut.Append(idx);
