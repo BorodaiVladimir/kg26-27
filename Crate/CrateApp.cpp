@@ -7,6 +7,7 @@
 #include "Lights.h"
 #include "RenderingSystem.h"
 #include "KdTree.h"
+#include "ParticleSystem.h"
 #include <DirectXCollision.h>
 #include <memory>
 #include <random>
@@ -206,6 +207,7 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
     std::unique_ptr<RenderingSystem> mRenderingSystem;
+    std::unique_ptr<ParticleSystem> mParticleSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mSponzaOpaqueRitems;
@@ -274,6 +276,7 @@ private:
     static constexpr float kForestLodMeshDistance = 26.0f;
     static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
     static constexpr UINT kTreeInstanceBillboardSrvHeapIndex = 241;
+    static constexpr UINT kParticleSrvHeapStartIndex = 244;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -381,6 +384,14 @@ bool CrateApp::Initialize()
         mDepthStencilFormat,
         m4xMsaaState,
         m4xMsaaQuality);
+
+    mParticleSystem = std::make_unique<ParticleSystem>();
+    mParticleSystem->Initialize(
+        md3dDevice.Get(),
+        mCommandList.Get(),
+        mSrvDescriptorHeap.Get(),
+        mCbvSrvDescriptorSize,
+        kParticleSrvHeapStartIndex);
 
     ThrowIfFailed(mCommandList->Close());
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
@@ -544,6 +555,12 @@ void CrateApp::Draw(const GameTimer& gt)
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
     DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
     DrawBillboardForest(mCommandList.Get());
+    if (mParticleSystem)
+    {
+        mParticleSystem->SetEmitterPosition(XMFLOAT3(0.0f, 1.2f, 0.0f));
+        mParticleSystem->Update(mCommandList.Get(), gt.DeltaTime(), gt.TotalTime());
+        mParticleSystem->Render(mCommandList.Get(), passAddress);
+    }
 
     mRenderingSystem->EndGeometryPass(mCommandList.Get());
 
