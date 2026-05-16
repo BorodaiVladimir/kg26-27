@@ -1,4 +1,5 @@
 #include "ParticleSystem.h"
+#include "GBuffer.h"
 #include "FrameResource.h"
 #include <cstddef>
 
@@ -109,10 +110,10 @@ void ParticleSystem::BuildPSOs()
     drawDesc.SampleMask = UINT_MAX;
     drawDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
     drawDesc.NumRenderTargets = 4;
-    drawDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    drawDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    drawDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    drawDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    drawDesc.RTVFormats[0] = GBuffer::AlbedoFormat;
+    drawDesc.RTVFormats[1] = GBuffer::NormalFormat;
+    drawDesc.RTVFormats[2] = GBuffer::MaterialFormat;
+    drawDesc.RTVFormats[3] = GBuffer::PositionFormat;
     drawDesc.SampleDesc.Count = 1;
     drawDesc.SampleDesc.Quality = 0;
     drawDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -207,6 +208,14 @@ void ParticleSystem::BuildBuffersAndDescriptors(ID3D12GraphicsCommandList* cmdLi
     mMappedIndirectArgs->StartInstanceLocation = 0;
     ThrowIfFailed(mDevice->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &argsDesc,
         D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, nullptr, IID_PPV_ARGS(&mIndirectArgs)));
+
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = mSrvHeap->GetDesc();
+    constexpr UINT kParticleDescriptorCount = 10;
+    if (mDescriptorStartIndex + kParticleDescriptorCount > heapDesc.NumDescriptors)
+    {
+        OutputDebugStringA("ParticleSystem: descriptor heap overflow.\n");
+        ThrowIfFailed(E_INVALIDARG);
+    }
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE hCpu(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), mDescriptorStartIndex, mDescriptorSize);
 
@@ -391,15 +400,21 @@ void ParticleSystem::Update(ID3D12GraphicsCommandList* cmdList, float dt, float 
     mMappedIndirectArgs->InstanceCount = 0;
     mMappedIndirectArgs->StartVertexLocation = 0;
     mMappedIndirectArgs->StartInstanceLocation = 0;
-    auto argsToCopy = CD3DX12_RESOURCE_BARRIER::Transition(mIndirectArgs.Get(),
-        D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmdList->ResourceBarrier(1, &argsToCopy);
+    auto sortToCopySrc = CD3DX12_RESOURCE_BARRIER::Transition(
+        mSortCounter.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    auto argsToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+        mIndirectArgs.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_RESOURCE_BARRIER preCopyBarriers[2] = { sortToCopySrc, argsToCopy };
+    cmdList->ResourceBarrier(2, preCopyBarriers);
     cmdList->CopyBufferRegion(mIndirectArgs.Get(), 0, mIndirectArgsUpload.Get(), 0, sizeof(D3D12_DRAW_ARGUMENTS));
     cmdList->CopyBufferRegion(mIndirectArgs.Get(), static_cast<UINT>(offsetof(D3D12_DRAW_ARGUMENTS, InstanceCount)),
         mSortCounter.Get(), 0, sizeof(UINT));
-    auto argsToIndirect = CD3DX12_RESOURCE_BARRIER::Transition(mIndirectArgs.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-    cmdList->ResourceBarrier(1, &argsToIndirect);
+    auto sortToUav = CD3DX12_RESOURCE_BARRIER::Transition(
+        mSortCounter.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    auto argsToIndirect = CD3DX12_RESOURCE_BARRIER::Transition(
+        mIndirectArgs.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    D3D12_RESOURCE_BARRIER postCopyBarriers[2] = { sortToUav, argsToIndirect };
+    cmdList->ResourceBarrier(2, postCopyBarriers);
 
     SwapBuffers();
 }

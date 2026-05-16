@@ -95,7 +95,7 @@ VsOut VS(VertexIn vin)
 }
 
 [domain("tri")]
-[partitioning("fractional_odd")]
+[partitioning("integer")]
 [outputtopology("triangle_cw")]
 [outputcontrolpoints(3)]
 [patchconstantfunc("HSConst")]
@@ -116,10 +116,7 @@ HsPatch HSConst(InputPatch<VsOut, 3> p, uint patchId : SV_PrimitiveID)
         return o;
     }
 
-    float3 c = (p[0].PosW + p[1].PosW + p[2].PosW) / 3.0f;
-    float dist = distance(c, gEyePosW);
-    float t = saturate(dist / max(gTessParams.z, 1.0f));
-    float tf = lerp(7.0f, 1.0f, t);
+    const float tf = (gTessParams.w > 0.5f) ? 4.0f : 1.0f;
     o.Edge[0] = tf;
     o.Edge[1] = tf;
     o.Edge[2] = tf;
@@ -189,6 +186,6 @@ GBufferOut PS(DsOut pin)
     gout.Albedo = albedo;
     gout.Normal = float4(bumped * 0.5f + 0.5f, 1.0f);
     gout.Material = float4(gFresnelR0, saturate(gRoughness));
-    gout.Position = float4(pin.PosV, 1.0f);
+    gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

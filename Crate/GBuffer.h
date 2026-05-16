@@ -6,8 +6,13 @@ class GBuffer
 {
 public:
     static constexpr UINT BufferCount = 4;
-    static constexpr UINT ExtraSrvCount = 1;
+    static constexpr UINT ExtraSrvCount = 2;
     static constexpr UINT TotalSrvCount = BufferCount + ExtraSrvCount;
+
+    static constexpr DXGI_FORMAT AlbedoFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    static constexpr DXGI_FORMAT NormalFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    static constexpr DXGI_FORMAT MaterialFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    static constexpr DXGI_FORMAT PositionFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
 
 public:
     void Initialize(ID3D12Device* device, UINT width, UINT height);
@@ -33,10 +38,10 @@ private:
 
     DXGI_FORMAT mFormats[BufferCount] =
     {
-        DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT,
-        DXGI_FORMAT_R8G8B8A8_UNORM,
-        DXGI_FORMAT_R16G16B16A16_FLOAT
+        AlbedoFormat,
+        NormalFormat,
+        MaterialFormat,
+        PositionFormat
     };
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mRtvHeap = nullptr;

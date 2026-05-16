@@ -6,6 +6,7 @@
 #include "../Common/GeometryGenerator.h"
 #include "Lights.h"
 #include "RenderingSystem.h"
+#include "ShadowSystem.h"
 #include "KdTree.h"
 #include "ParticleSystem.h"
 #include <DirectXCollision.h>
@@ -176,7 +177,9 @@ private:
     void BuildFrameResources();
     void BuildMaterials();
     void BuildRenderItems();
+    void ComputeSponzaWorldBounds();
     void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
+    void DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
     void CreateBillboardForest();
@@ -207,10 +210,14 @@ private:
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
     std::unique_ptr<RenderingSystem> mRenderingSystem;
+    std::unique_ptr<ShadowSystem> mShadowSystem;
     std::unique_ptr<ParticleSystem> mParticleSystem;
 
     std::vector<std::unique_ptr<RenderItem>> mAllRitems;
     std::vector<RenderItem*> mSponzaOpaqueRitems;
+    bool mHasSponzaBounds = false;
+    XMFLOAT3 mSponzaBoundsMin = {};
+    XMFLOAT3 mSponzaBoundsMax = {};
     std::vector<RenderItem*> mStressRitems;
     std::vector<DirectX::BoundingBox> mStressWorldBounds;
     std::vector<RenderItem*> mStressVisibleRitems;
@@ -277,6 +284,8 @@ private:
     static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
     static constexpr UINT kTreeInstanceBillboardSrvHeapIndex = 241;
     static constexpr UINT kParticleSrvHeapStartIndex = 244;
+    static constexpr UINT kShadowSrvHeapStartIndex = 500;
+    static constexpr UINT kSrvDescriptorHeapSize = 512;
 };
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, int showCmd)
@@ -307,7 +316,8 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mPhi = 0.4f * XM_PI;
     mRadius = 8.0f;
 
-    mDirectionalLights[0].Direction = { 0.45f, -0.72f, 0.52f };
+    // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
+    mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
     mDirectionalLights[0].Strength = { 0.20f, 0.35f, 1.40f };
 
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
@@ -329,7 +339,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
-    mSpotLights[1].Strength = { 3.6f, 0.28f, 0.28f };
+    mSpotLights[1].Strength = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].FalloffStart = 1.5f;
     mSpotLights[1].FalloffEnd = 70.0f;
     mSpotLights[1].SpotPower = 96.0f;
@@ -384,6 +394,13 @@ bool CrateApp::Initialize()
         mDepthStencilFormat,
         m4xMsaaState,
         m4xMsaaQuality);
+
+    mShadowSystem = std::make_unique<ShadowSystem>();
+    mShadowSystem->Initialize(
+        md3dDevice.Get(),
+        mSrvDescriptorHeap.Get(),
+        kShadowSrvHeapStartIndex,
+        mCbvSrvDescriptorSize);
 
     mParticleSystem = std::make_unique<ParticleSystem>();
     mParticleSystem->Initialize(
@@ -548,6 +565,34 @@ void CrateApp::Draw(const GameTimer& gt)
     auto passCB = mCurrFrameResource->PassCB->Resource();
     auto passAddress = passCB->GetGPUVirtualAddress();
 
+    if (mShadowSystem)
+    {
+        const XMMATRIX view = XMLoadFloat4x4(&mView);
+        const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+        const XMVECTOR lightDir = XMLoadFloat3(&mDirectionalLights[0].Direction);
+        if (mHasSponzaBounds)
+        {
+            mShadowSystem->SetSceneBounds(
+                XMLoadFloat3(&mSponzaBoundsMin),
+                XMLoadFloat3(&mSponzaBoundsMax));
+        }
+        mShadowSystem->UpdateCascades(
+            view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
+        mShadowSystem->UpdateLightingConstants(lightDir);
+
+        mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
+        for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
+        {
+            mShadowSystem->BeginCascade(mCommandList.Get(), c);
+            DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
+        }
+        mShadowSystem->EndPass(mCommandList.Get());
+        mCommandList->RSSetViewports(1, &mScreenViewport);
+        mCommandList->RSSetScissorRects(1, &mScissorRect);
+    }
+
+    mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+
     CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
     checkerTex.Offset(1, mCbvSrvDescriptorSize);
     mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex, mGeometryWireframe);
@@ -574,7 +619,10 @@ void CrateApp::Draw(const GameTimer& gt)
         CurrentBackBufferView(),
         passAddress,
         mCurrFrameResource->DeferredLightParamsCB->Resource()->GetGPUVirtualAddress(),
+        mShadowSystem ? mShadowSystem->GetLightingConstantBufferAddress() : 0,
         mCurrFrameResource->DeferredLightBuffer->Resource(),
+        mShadowSystem ? mShadowSystem->GetShadowMapResource() : nullptr,
+        mShadowSystem ? ShadowSystem::kCascadeCount : 0u,
         kDeferredTotalLightCount,
         sizeof(DeferredLightGpu));
 
@@ -1509,7 +1557,7 @@ void CrateApp::BuildDescriptorHeaps()
 {
     OutputDebugStringA("Building descriptor heap...\n");
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.NumDescriptors = 256;
+    srvHeapDesc.NumDescriptors = kSrvDescriptorHeapSize;
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -1822,11 +1870,55 @@ void CrateApp::BuildRenderItems()
             mSponzaOpaqueRitems.push_back(e.get());
     }
 
+    ComputeSponzaWorldBounds();
+
     sprintf_s(msg, "Total render items: %zu\n", mAllRitems.size());
     OutputDebugStringA(msg);
     OutputDebugStringA("========================================\n");
     OutputDebugStringA("Render items built\n");
     OutputDebugStringA("========================================\n\n");
+}
+
+void CrateApp::ComputeSponzaWorldBounds()
+{
+    mHasSponzaBounds = false;
+
+    for (const LoadedModel& model : mLoadedModels)
+    {
+        if (model.Name != "Sponza")
+            continue;
+
+        const XMMATRIX world =
+            XMMatrixScaling(0.02f, 0.02f, 0.02f) * XMMatrixTranslation(0.0f, -1.0f, 0.0f);
+
+        XMVECTOR vmin = XMVectorSet(FLT_MAX, FLT_MAX, FLT_MAX, 0.0f);
+        XMVECTOR vmax = XMVectorSet(-FLT_MAX, -FLT_MAX, -FLT_MAX, 0.0f);
+        for (const Vertex& v : model.Vertices)
+        {
+            const XMVECTOR p = XMVector3TransformCoord(XMLoadFloat3(&v.Pos), world);
+            vmin = XMVectorMin(vmin, p);
+            vmax = XMVectorMax(vmax, p);
+        }
+
+        constexpr float pad = 1.5f;
+        const XMVECTOR padV = XMVectorSet(pad, pad, pad, 0.0f);
+        XMStoreFloat3(&mSponzaBoundsMin, XMVectorSubtract(vmin, padV));
+        XMStoreFloat3(&mSponzaBoundsMax, XMVectorAdd(vmax, padV));
+        mHasSponzaBounds = true;
+
+        char msg[256];
+        sprintf_s(
+            msg,
+            "Sponza world AABB: (%.2f,%.2f,%.2f) - (%.2f,%.2f,%.2f)\n",
+            mSponzaBoundsMin.x,
+            mSponzaBoundsMin.y,
+            mSponzaBoundsMin.z,
+            mSponzaBoundsMax.x,
+            mSponzaBoundsMax.y,
+            mSponzaBoundsMax.z);
+        OutputDebugStringA(msg);
+        return;
+    }
 }
 
 void CrateApp::BuildStressTestObjects(int& objIndex)
@@ -2099,6 +2191,42 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
     }
 }
 
+void CrateApp::DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
+{
+    if (!mShadowSystem || ritems.empty())
+        return;
+
+    const UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+    const UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
+    auto objectCB = mCurrFrameResource->ObjectCB->Resource();
+    auto matCB = mCurrFrameResource->MaterialCB->Resource();
+
+    for (const RenderItem* ri : ritems)
+    {
+        if (!ri || !ri->Geo || ri->IsStressObject)
+            continue;
+
+        auto vbv = ri->Geo->VertexBufferView();
+        auto ibv = ri->Geo->IndexBufferView();
+        cmdList->IASetVertexBuffers(0, 1, &vbv);
+        cmdList->IASetIndexBuffer(&ibv);
+        cmdList->IASetPrimitiveTopology(ri->PrimitiveType);
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE heightSrv(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        heightSrv.Offset(
+            ri->Mat->NormalSrvHeapIndex >= 0 ? ri->Mat->NormalSrvHeapIndex : ri->Mat->DiffuseSrvHeapIndex,
+            mCbvSrvDescriptorSize);
+
+        const D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
+        const D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
+
+        cmdList->SetGraphicsRootDescriptorTable(4, heightSrv);
+        cmdList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+        cmdList->SetGraphicsRootConstantBufferView(2, matCBAddress);
+        cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
+    }
+}
+
 void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
 {
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
@@ -2265,13 +2393,6 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 
 void CrateApp::UpdateDeferredLightCB()
 {
-    XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
-    XMVECTOR lookAt = XMVectorZero();
-    XMVECTOR viewDir = XMVector3Normalize(lookAt - eyePos);
-
-    mSpotLights[1].Position = mEyePos;
-    XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
-
     UINT activePointLights = 0;
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
     {
@@ -2289,9 +2410,8 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 0.0f;
-        XMVECTOR dirW = XMLoadFloat3(&mDirectionalLights[i].Direction);
-        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
-        XMStoreFloat3(&l.Direction, dirV);
+        // Мировое направление: в шейдере lightVec = -Direction (вектор к источнику).
+        XMStoreFloat3(&l.Direction, XMLoadFloat3(&mDirectionalLights[i].Direction));
         l.Strength = mDirectionalLights[i].Strength;
         mCurrFrameResource->DeferredLightBuffer->CopyData(dst, l);
     }

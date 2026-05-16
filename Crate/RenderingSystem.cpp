@@ -55,6 +55,14 @@ void RenderingSystem::BeginGeometryPass(
     };
     cmdList->OMSetRenderTargets(GBuffer::BufferCount, rtvs, false, &dsv);
 
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(mWidth);
+    viewport.Height = static_cast<float>(mHeight);
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(mWidth), static_cast<LONG>(mHeight) };
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
     cmdList->SetPipelineState(wireframe ? mGeometryWireframePSO.Get() : mGeometryPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);
@@ -71,7 +79,10 @@ void RenderingSystem::ExecuteLightingPass(
     D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
     D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
     D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
+    D3D12_GPU_VIRTUAL_ADDRESS shadowLightingCbAddress,
     ID3D12Resource* lightBufferResource,
+    ID3D12Resource* shadowMapResource,
+    UINT shadowCascadeCount,
     UINT lightCount,
     UINT lightStrideBytes)
 {
@@ -85,16 +96,42 @@ void RenderingSystem::ExecuteLightingPass(
     lightSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
     mDevice->CreateShaderResourceView(lightBufferResource, &lightSrvDesc, mGBuffer.GetSrvCpu(GBuffer::BufferCount));
 
+    if (shadowMapResource && shadowCascadeCount > 0)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDesc = {};
+        shadowSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        shadowSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        shadowSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shadowSrvDesc.Texture2DArray.MostDetailedMip = 0;
+        shadowSrvDesc.Texture2DArray.MipLevels = 1;
+        shadowSrvDesc.Texture2DArray.FirstArraySlice = 0;
+        shadowSrvDesc.Texture2DArray.ArraySize = shadowCascadeCount;
+        mDevice->CreateShaderResourceView(
+            shadowMapResource,
+            &shadowSrvDesc,
+            mGBuffer.GetSrvCpu(GBuffer::BufferCount + 1));
+    }
+
     cmdList->OMSetRenderTargets(1, &backBufferRtv, true, nullptr);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(mWidth);
+    viewport.Height = static_cast<float>(mHeight);
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(mWidth), static_cast<LONG>(mHeight) };
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
     cmdList->SetPipelineState(mLightingPSO.Get());
     cmdList->SetGraphicsRootSignature(mLightingRootSignature.Get());
 
-    ID3D12DescriptorHeap* heaps[] = { mGBuffer.GetSrvHeap() };
-    cmdList->SetDescriptorHeaps(1, heaps);
+    ID3D12DescriptorHeap* heap = mGBuffer.GetSrvHeap();
+    cmdList->SetDescriptorHeaps(1, &heap);
 
     cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(0));
     cmdList->SetGraphicsRootConstantBufferView(1, passCbAddress);
     cmdList->SetGraphicsRootConstantBufferView(2, lightParamsCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(3, shadowLightingCbAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -196,26 +233,38 @@ void RenderingSystem::BuildBillboardRootSignature()
 
 void RenderingSystem::BuildLightingRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE gbufferTable;
-    gbufferTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::TotalSrvCount, 0);
+    CD3DX12_DESCRIPTOR_RANGE srvTable;
+    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::TotalSrvCount, 0);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[3];
-    slotRootParameter[0].InitAsDescriptorTable(1, &gbufferTable, D3D12_SHADER_VISIBILITY_PIXEL);
+    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+    slotRootParameter[0].InitAsDescriptorTable(1, &srvTable, D3D12_SHADER_VISIBILITY_PIXEL);
     slotRootParameter[1].InitAsConstantBufferView(1);
     slotRootParameter[2].InitAsConstantBufferView(2);
+    slotRootParameter[3].InitAsConstantBufferView(3);
 
-    CD3DX12_STATIC_SAMPLER_DESC pointClamp(
+    CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+    samplers[0].Init(
         0,
         D3D12_FILTER_MIN_MAG_MIP_POINT,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[1].Init(
+        1,
+        D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+        0.0f,
+        16,
+        D3D12_COMPARISON_FUNC_LESS_EQUAL);
+    samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
-        3,
+        _countof(slotRootParameter),
         slotRootParameter,
-        1,
-        &pointClamp,
+        _countof(samplers),
+        samplers,
         D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
     ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -300,10 +349,10 @@ void RenderingSystem::BuildPSOs()
     geometryPsoDesc.SampleMask = UINT_MAX;
     geometryPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
     geometryPsoDesc.NumRenderTargets = GBuffer::BufferCount;
-    geometryPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    geometryPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    geometryPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    geometryPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    geometryPsoDesc.RTVFormats[0] = GBuffer::AlbedoFormat;
+    geometryPsoDesc.RTVFormats[1] = GBuffer::NormalFormat;
+    geometryPsoDesc.RTVFormats[2] = GBuffer::MaterialFormat;
+    geometryPsoDesc.RTVFormats[3] = GBuffer::PositionFormat;
     geometryPsoDesc.SampleDesc.Count = 1;
     geometryPsoDesc.SampleDesc.Quality = 0;
     geometryPsoDesc.DSVFormat = mDepthStencilFormat;
@@ -413,10 +462,10 @@ void RenderingSystem::BuildPSOs()
     billboardPsoDesc.SampleMask = UINT_MAX;
     billboardPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     billboardPsoDesc.NumRenderTargets = GBuffer::BufferCount;
-    billboardPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    billboardPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    billboardPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    billboardPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    billboardPsoDesc.RTVFormats[0] = GBuffer::AlbedoFormat;
+    billboardPsoDesc.RTVFormats[1] = GBuffer::NormalFormat;
+    billboardPsoDesc.RTVFormats[2] = GBuffer::MaterialFormat;
+    billboardPsoDesc.RTVFormats[3] = GBuffer::PositionFormat;
     billboardPsoDesc.SampleDesc.Count = 1;
     billboardPsoDesc.SampleDesc.Quality = 0;
     billboardPsoDesc.DSVFormat = mDepthStencilFormat;
@@ -442,10 +491,10 @@ void RenderingSystem::BuildPSOs()
     treeMeshPsoDesc.SampleMask = UINT_MAX;
     treeMeshPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     treeMeshPsoDesc.NumRenderTargets = GBuffer::BufferCount;
-    treeMeshPsoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    treeMeshPsoDesc.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    treeMeshPsoDesc.RTVFormats[2] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    treeMeshPsoDesc.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    treeMeshPsoDesc.RTVFormats[0] = GBuffer::AlbedoFormat;
+    treeMeshPsoDesc.RTVFormats[1] = GBuffer::NormalFormat;
+    treeMeshPsoDesc.RTVFormats[2] = GBuffer::MaterialFormat;
+    treeMeshPsoDesc.RTVFormats[3] = GBuffer::PositionFormat;
     treeMeshPsoDesc.SampleDesc.Count = 1;
     treeMeshPsoDesc.SampleDesc.Quality = 0;
     treeMeshPsoDesc.DSVFormat = mDepthStencilFormat;
@@ -460,6 +509,15 @@ void RenderingSystem::BeginTransparentWaterPass(
     bool wireframe)
 {
     cmdList->OMSetRenderTargets(1, &backBufferRtv, FALSE, &dsv);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(mWidth);
+    viewport.Height = static_cast<float>(mHeight);
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(mWidth), static_cast<LONG>(mHeight) };
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
     cmdList->SetPipelineState(wireframe ? mWaterTransparentWireframePSO.Get() : mWaterTransparentPSO.Get());
     cmdList->SetGraphicsRootSignature(mGeometryRootSignature.Get());
     cmdList->SetGraphicsRootConstantBufferView(2, passCbAddress);

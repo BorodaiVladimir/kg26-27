@@ -44,7 +44,7 @@ struct VSOut
 struct GSOut
 {
     float4 PosH : SV_POSITION;
-    float3 PosV : POSITION1;
+    float3 PosW : POSITION;
     float3 NormalW : NORMAL;
     float4 Col : COLOR0;
 };
@@ -99,19 +99,19 @@ void GSMain(point VSOut vin[1], inout TriangleStream<GSOut> tri)
     g.Col = vin[0].Col;
 
     g.PosH = mul(float4(p0, 1.0f), gViewProj);
-    g.PosV = mul(float4(p0, 1.0f), gView).xyz;
+    g.PosW = p0;
     tri.Append(g);
 
     g.PosH = mul(float4(p1, 1.0f), gViewProj);
-    g.PosV = mul(float4(p1, 1.0f), gView).xyz;
+    g.PosW = p1;
     tri.Append(g);
 
     g.PosH = mul(float4(p2, 1.0f), gViewProj);
-    g.PosV = mul(float4(p2, 1.0f), gView).xyz;
+    g.PosW = p2;
     tri.Append(g);
 
     g.PosH = mul(float4(p3, 1.0f), gViewProj);
-    g.PosV = mul(float4(p3, 1.0f), gView).xyz;
+    g.PosW = p3;
     tri.Append(g);
 }
 
@@ -122,6 +122,7 @@ GBufferOut PSMain(GSOut pin)
     o.Albedo = float4(pin.Col.rgb, 1.0f);
     o.Normal = float4(n * 0.5f + 0.5f, 1.0f);
     o.Material = float4(0.04f, 0.04f, 0.04f, 0.55f);
-    o.Position = float4(pin.PosV, 1.0f);
+    float3 posV = mul(float4(pin.PosW, 1.0f), gView).xyz;
+    o.Position = float4(pin.PosW, posV.z);
     return o;
 }

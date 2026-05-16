@@ -132,6 +132,6 @@ GBufferOut PS(VsOut pin)
     gout.Albedo = float4(albedo.rgb, 1.0f);
     gout.Normal = float4(n * 0.5f + 0.5f, 1.0f);
     gout.Material = float4(gFresnelR0, saturate(gRoughness));
-    gout.Position = float4(pin.PosV, 1.0f);
+    gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

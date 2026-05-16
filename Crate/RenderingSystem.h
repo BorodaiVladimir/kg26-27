@@ -31,7 +31,10 @@ public:
         D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
         D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
         D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
+        D3D12_GPU_VIRTUAL_ADDRESS shadowLightingCbAddress,
         ID3D12Resource* lightBufferResource,
+        ID3D12Resource* shadowMapResource,
+        UINT shadowCascadeCount,
         UINT lightCount,
         UINT lightStrideBytes);
 
