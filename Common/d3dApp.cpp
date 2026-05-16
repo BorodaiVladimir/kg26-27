@@ -48,6 +48,14 @@ float D3DApp::AspectRatio()const
 	return static_cast<float>(mClientWidth) / mClientHeight;
 }
 
+HRESULT D3DApp::GetDeviceRemovedReason() const
+{
+    if (!md3dDevice)
+        return S_OK;
+
+    return md3dDevice->GetDeviceRemovedReason();
+}
+
 bool D3DApp::Get4xMsaaState()const
 {
     return m4xMsaaState;

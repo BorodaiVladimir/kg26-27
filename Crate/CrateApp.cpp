@@ -178,7 +178,10 @@ private:
     void BuildMaterials();
     void BuildRenderItems();
     void ComputeSponzaWorldBounds();
-    void DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
+    void DrawRenderItems(
+        ID3D12GraphicsCommandList* cmdList,
+        const std::vector<RenderItem*>& ritems,
+        size_t maxCount = SIZE_MAX);
     void DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
@@ -275,11 +278,14 @@ private:
     UINT mForestMeshCount = 0;
     UINT mForestBillboardCount = 0;
     bool mTreeLodMeshLoaded = false;
+    UINT mGpuFrameIndex = 0;
     UINT mTreeMtlDiffuseSrvHeapIndex = 0;
     UINT mBillboardForestInstanceCount = 0;
     UINT mBillboardObjectCbIndex = 0;
     UINT mBillboardTreeSrvHeapIndex = 0;
     static constexpr UINT kMaxForestInstances = 512;
+    static constexpr size_t kMaxStressDrawsPerFrame = 400u;
+    static constexpr UINT kMaxPointLightsForShading = 256u;
     static constexpr float kForestLodMeshDistance = 26.0f;
     static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
     static constexpr UINT kTreeInstanceBillboardSrvHeapIndex = 241;
@@ -303,7 +309,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE prevInstance, PSTR cmdLine, in
     }
     catch (DxException& e)
     {
-        MessageBox(nullptr, e.ToString().c_str(), L"HR Failed", MB_OK);
+        std::wstring msg = e.ToString();
+        if (D3DApp* app = D3DApp::GetApp())
+        {
+            const HRESULT removed = app->GetDeviceRemovedReason();
+            if (FAILED(removed))
+            {
+                wchar_t removedMsg[96];
+                swprintf_s(removedMsg, L"\nGetDeviceRemovedReason: 0x%08X", static_cast<unsigned>(removed));
+                msg += removedMsg;
+            }
+        }
+        MessageBox(nullptr, msg.c_str(), L"HR Failed", MB_OK);
         return 0;
     }
 }
@@ -401,6 +418,11 @@ bool CrateApp::Initialize()
         mSrvDescriptorHeap.Get(),
         kShadowSrvHeapStartIndex,
         mCbvSrvDescriptorSize);
+    mShadowSystem->UploadShadowOverlayTexture(mCommandList.Get());
+    mRenderingSystem->SetLightingResources(
+        mShadowSystem->GetShadowMapResource(),
+        ShadowSystem::kCascadeCount,
+        mShadowSystem->GetShadowOverlayResource());
 
     mParticleSystem = std::make_unique<ParticleSystem>();
     mParticleSystem->Initialize(
@@ -510,9 +532,19 @@ void CrateApp::Update(const GameTimer& gt)
     }
 
     mSpawnAccumulator += gt.DeltaTime();
-    while (mSpawnAccumulator >= 1.0f)
+    const float spawnInterval = 1.0f;
+    while (mSpawnAccumulator >= spawnInterval)
     {
-        mSpawnAccumulator -= 1.0f;
+        mSpawnAccumulator -= spawnInterval;
+        UINT activeCount = 0;
+        for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+        {
+            if (mFallingActive[i])
+                ++activeCount;
+        }
+        if (activeCount >= kMaxPointLightsForShading)
+            break;
+
         for (UINT i = 0; i < kDeferredPointLightCount; ++i)
         {
             if (!mFallingActive[i])
@@ -576,9 +608,9 @@ void CrateApp::Draw(const GameTimer& gt)
                 XMLoadFloat3(&mSponzaBoundsMin),
                 XMLoadFloat3(&mSponzaBoundsMax));
         }
+
         mShadowSystem->UpdateCascades(
             view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
-        mShadowSystem->UpdateLightingConstants(lightDir);
 
         mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
         for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
@@ -587,6 +619,8 @@ void CrateApp::Draw(const GameTimer& gt)
             DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
         }
         mShadowSystem->EndPass(mCommandList.Get());
+
+        mShadowSystem->UpdateLightingConstants(lightDir);
         mCommandList->RSSetViewports(1, &mScreenViewport);
         mCommandList->RSSetScissorRects(1, &mScissorRect);
     }
@@ -595,19 +629,33 @@ void CrateApp::Draw(const GameTimer& gt)
 
     CD3DX12_GPU_DESCRIPTOR_HANDLE checkerTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
     checkerTex.Offset(1, mCbvSrvDescriptorSize);
-    mRenderingSystem->BeginGeometryPass(mCommandList.Get(), DepthStencilView(), passAddress, checkerTex, mGeometryWireframe);
+    mRenderingSystem->BeginGeometryPass(
+        mCommandList.Get(),
+        DepthStencilView(),
+        passAddress,
+        checkerTex,
+        mGeometryWireframe);
 
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
-    DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
+    if (!mStressVisibleRitems.empty())
+    {
+        DrawRenderItems(
+            mCommandList.Get(),
+            mStressVisibleRitems,
+            kMaxStressDrawsPerFrame);
+    }
     DrawBillboardForest(mCommandList.Get());
+
+    mRenderingSystem->EndGeometryPass(mCommandList.Get());
+
     if (mParticleSystem)
     {
         mParticleSystem->SetEmitterPosition(XMFLOAT3(0.0f, 1.2f, 0.0f));
         mParticleSystem->Update(mCommandList.Get(), gt.DeltaTime(), gt.TotalTime());
-        mParticleSystem->Render(mCommandList.Get(), passAddress);
     }
 
-    mRenderingSystem->EndGeometryPass(mCommandList.Get());
+    if (mShadowSystem)
+        mShadowSystem->PrepareForLighting(mCommandList.Get());
 
     auto transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
         D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -621,8 +669,6 @@ void CrateApp::Draw(const GameTimer& gt)
         mCurrFrameResource->DeferredLightParamsCB->Resource()->GetGPUVirtualAddress(),
         mShadowSystem ? mShadowSystem->GetLightingConstantBufferAddress() : 0,
         mCurrFrameResource->DeferredLightBuffer->Resource(),
-        mShadowSystem ? mShadowSystem->GetShadowMapResource() : nullptr,
-        mShadowSystem ? ShadowSystem::kCascadeCount : 0u,
         kDeferredTotalLightCount,
         sizeof(DeferredLightGpu));
 
@@ -1937,7 +1983,7 @@ void CrateApp::BuildStressTestObjects(int& objIndex)
     if (drawArg == boxGeo->DrawArgs.end())
         return;
 
-    constexpr int kStressTestCount = 5000;
+    constexpr int kStressTestCount = 800;
     mStressWorldBounds.clear();
     mStressWorldBounds.reserve(kStressTestCount);
 
@@ -2227,7 +2273,10 @@ void CrateApp::DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const s
     }
 }
 
-void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems)
+void CrateApp::DrawRenderItems(
+    ID3D12GraphicsCommandList* cmdList,
+    const std::vector<RenderItem*>& ritems,
+    size_t maxCount)
 {
     UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
     UINT matCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(MaterialConstants));
@@ -2235,7 +2284,8 @@ void CrateApp::DrawRenderItems(ID3D12GraphicsCommandList* cmdList, const std::ve
     auto objectCB = mCurrFrameResource->ObjectCB->Resource();
     auto matCB = mCurrFrameResource->MaterialCB->Resource();
 
-    for (size_t i = 0; i < ritems.size(); ++i)
+    const size_t drawCount = (std::min)(ritems.size(), maxCount);
+    for (size_t i = 0; i < drawCount; ++i)
     {
         auto ri = ritems[i];
 
@@ -2399,10 +2449,13 @@ void CrateApp::UpdateDeferredLightCB()
         if (mFallingActive[i])
             ++activePointLights;
     }
-    mActivePointLights = activePointLights;
+    mActivePointLights = (std::min)(activePointLights, kMaxPointLightsForShading);
 
     DeferredLightParams params = {};
     params.ActivePointLightCount = mActivePointLights;
+    params.ShadowOverlayStrength = mShadowSystem
+        ? mShadowSystem->GetShadowOverlayStrength()
+        : 1.0f;
     mCurrFrameResource->DeferredLightParamsCB->CopyData(0, params);
 
     UINT dst = 0;

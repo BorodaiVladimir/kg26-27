@@ -35,6 +35,52 @@ void RenderingSystem::OnResize(UINT width, UINT height)
     mGBuffer.OnResize(width, height);
 }
 
+void RenderingSystem::SetLightingResources(
+    ID3D12Resource* shadowMapResource,
+    UINT shadowCascadeCount,
+    ID3D12Resource* shadowOverlayResource)
+{
+    mShadowMapForLighting = shadowMapResource;
+    mShadowCascadeCountForLighting = shadowCascadeCount;
+    mShadowOverlayForLighting = shadowOverlayResource;
+}
+
+void RenderingSystem::CreateLightingSrvs()
+{
+    if (!mDevice)
+        return;
+
+    if (mShadowMapForLighting && mShadowCascadeCountForLighting > 0)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDesc = {};
+        shadowSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        shadowSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        shadowSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shadowSrvDesc.Texture2DArray.MostDetailedMip = 0;
+        shadowSrvDesc.Texture2DArray.MipLevels = 1;
+        shadowSrvDesc.Texture2DArray.FirstArraySlice = 0;
+        shadowSrvDesc.Texture2DArray.ArraySize = mShadowCascadeCountForLighting;
+        mDevice->CreateShaderResourceView(
+            mShadowMapForLighting,
+            &shadowSrvDesc,
+            mGBuffer.GetSrvCpu(GBuffer::BufferCount + 1));
+    }
+
+    if (mShadowOverlayForLighting)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC overlaySrvDesc = {};
+        overlaySrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        overlaySrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        overlaySrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        overlaySrvDesc.Texture2D.MostDetailedMip = 0;
+        overlaySrvDesc.Texture2D.MipLevels = 1;
+        mDevice->CreateShaderResourceView(
+            mShadowOverlayForLighting,
+            &overlaySrvDesc,
+            mGBuffer.GetSrvCpu(GBuffer::BufferCount + 2));
+    }
+}
+
 void RenderingSystem::BeginGeometryPass(
     ID3D12GraphicsCommandList* cmdList,
     D3D12_CPU_DESCRIPTOR_HANDLE dsv,
@@ -71,6 +117,8 @@ void RenderingSystem::BeginGeometryPass(
 
 void RenderingSystem::EndGeometryPass(ID3D12GraphicsCommandList* cmdList)
 {
+    // G-buffer targets must be unbound before RTV -> SRV transition (particles draw into them too).
+    cmdList->OMSetRenderTargets(0, nullptr, false, nullptr);
     mGBuffer.TransitionToShaderResources(cmdList);
 }
 
@@ -81,8 +129,6 @@ void RenderingSystem::ExecuteLightingPass(
     D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
     D3D12_GPU_VIRTUAL_ADDRESS shadowLightingCbAddress,
     ID3D12Resource* lightBufferResource,
-    ID3D12Resource* shadowMapResource,
-    UINT shadowCascadeCount,
     UINT lightCount,
     UINT lightStrideBytes)
 {
@@ -95,22 +141,7 @@ void RenderingSystem::ExecuteLightingPass(
     lightSrvDesc.Buffer.StructureByteStride = lightStrideBytes;
     lightSrvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
     mDevice->CreateShaderResourceView(lightBufferResource, &lightSrvDesc, mGBuffer.GetSrvCpu(GBuffer::BufferCount));
-
-    if (shadowMapResource && shadowCascadeCount > 0)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrvDesc = {};
-        shadowSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-        shadowSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        shadowSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        shadowSrvDesc.Texture2DArray.MostDetailedMip = 0;
-        shadowSrvDesc.Texture2DArray.MipLevels = 1;
-        shadowSrvDesc.Texture2DArray.FirstArraySlice = 0;
-        shadowSrvDesc.Texture2DArray.ArraySize = shadowCascadeCount;
-        mDevice->CreateShaderResourceView(
-            shadowMapResource,
-            &shadowSrvDesc,
-            mGBuffer.GetSrvCpu(GBuffer::BufferCount + 1));
-    }
+    CreateLightingSrvs();
 
     cmdList->OMSetRenderTargets(1, &backBufferRtv, true, nullptr);
 
@@ -129,9 +160,12 @@ void RenderingSystem::ExecuteLightingPass(
     cmdList->SetDescriptorHeaps(1, &heap);
 
     cmdList->SetGraphicsRootDescriptorTable(0, mGBuffer.GetSrvGpu(0));
-    cmdList->SetGraphicsRootConstantBufferView(1, passCbAddress);
-    cmdList->SetGraphicsRootConstantBufferView(2, lightParamsCbAddress);
-    cmdList->SetGraphicsRootConstantBufferView(3, shadowLightingCbAddress);
+    cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSrvGpu(GBuffer::BufferCount));
+    cmdList->SetGraphicsRootDescriptorTable(2, mGBuffer.GetSrvGpu(GBuffer::BufferCount + 1));
+    cmdList->SetGraphicsRootDescriptorTable(3, mGBuffer.GetSrvGpu(GBuffer::BufferCount + 2));
+    cmdList->SetGraphicsRootConstantBufferView(4, passCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(5, lightParamsCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(6, shadowLightingCbAddress);
     cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList->DrawInstanced(3, 1, 0, 0);
 }
@@ -233,22 +267,38 @@ void RenderingSystem::BuildBillboardRootSignature()
 
 void RenderingSystem::BuildLightingRootSignature()
 {
-    CD3DX12_DESCRIPTOR_RANGE srvTable;
-    srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::TotalSrvCount, 0);
+    CD3DX12_DESCRIPTOR_RANGE gbufferSrvs;
+    gbufferSrvs.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, GBuffer::BufferCount, 0);
+    CD3DX12_DESCRIPTOR_RANGE lightsSrv;
+    lightsSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);
+    CD3DX12_DESCRIPTOR_RANGE shadowSrv;
+    shadowSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 5);
+    CD3DX12_DESCRIPTOR_RANGE overlaySrv;
+    overlaySrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 6);
 
-    CD3DX12_ROOT_PARAMETER slotRootParameter[4];
-    slotRootParameter[0].InitAsDescriptorTable(1, &srvTable, D3D12_SHADER_VISIBILITY_PIXEL);
-    slotRootParameter[1].InitAsConstantBufferView(1);
-    slotRootParameter[2].InitAsConstantBufferView(2);
-    slotRootParameter[3].InitAsConstantBufferView(3);
+    CD3DX12_ROOT_PARAMETER slotRootParameter[7];
+    slotRootParameter[0].InitAsDescriptorTable(1, &gbufferSrvs, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[1].InitAsDescriptorTable(1, &lightsSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[2].InitAsDescriptorTable(1, &shadowSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[3].InitAsDescriptorTable(1, &overlaySrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[4].InitAsConstantBufferView(1);
+    slotRootParameter[5].InitAsConstantBufferView(2);
+    slotRootParameter[6].InitAsConstantBufferView(3);
 
-    CD3DX12_STATIC_SAMPLER_DESC samplers[2];
+    CD3DX12_STATIC_SAMPLER_DESC samplers[3] = {};
     samplers[0].Init(
         0,
         D3D12_FILTER_MIN_MAG_MIP_POINT,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        0.0f,
+        1,
+        D3D12_COMPARISON_FUNC_NEVER,
+        D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
+        0.0f,
+        D3D12_FLOAT32_MAX,
+        D3D12_SHADER_VISIBILITY_PIXEL);
     samplers[1].Init(
         1,
         D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,
@@ -256,16 +306,32 @@ void RenderingSystem::BuildLightingRootSignature()
         D3D12_TEXTURE_ADDRESS_MODE_BORDER,
         D3D12_TEXTURE_ADDRESS_MODE_BORDER,
         0.0f,
-        16,
-        D3D12_COMPARISON_FUNC_LESS_EQUAL);
-    samplers[1].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+        1,
+        D3D12_COMPARISON_FUNC_LESS_EQUAL,
+        D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE,
+        0.0f,
+        D3D12_FLOAT32_MAX,
+        D3D12_SHADER_VISIBILITY_PIXEL);
+    samplers[2].Init(
+        2,
+        D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        0.0f,
+        1,
+        D3D12_COMPARISON_FUNC_NEVER,
+        D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
+        0.0f,
+        D3D12_FLOAT32_MAX,
+        D3D12_SHADER_VISIBILITY_PIXEL);
 
     CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
         _countof(slotRootParameter),
         slotRootParameter,
         _countof(samplers),
         samplers,
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        D3D12_ROOT_SIGNATURE_FLAG_NONE);
 
     ComPtr<ID3DBlob> serializedRootSig = nullptr;
     ComPtr<ID3DBlob> errorBlob = nullptr;

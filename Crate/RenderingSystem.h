@@ -17,6 +17,11 @@ public:
 
     void OnResize(UINT width, UINT height);
 
+    void SetLightingResources(
+        ID3D12Resource* shadowMapResource,
+        UINT shadowCascadeCount,
+        ID3D12Resource* shadowOverlayResource);
+
     void BeginGeometryPass(
         ID3D12GraphicsCommandList* cmdList,
         D3D12_CPU_DESCRIPTOR_HANDLE dsv,
@@ -33,8 +38,6 @@ public:
         D3D12_GPU_VIRTUAL_ADDRESS lightParamsCbAddress,
         D3D12_GPU_VIRTUAL_ADDRESS shadowLightingCbAddress,
         ID3D12Resource* lightBufferResource,
-        ID3D12Resource* shadowMapResource,
-        UINT shadowCascadeCount,
         UINT lightCount,
         UINT lightStrideBytes);
 
@@ -68,6 +71,11 @@ private:
     UINT mMsaaQuality = 0;
 
     GBuffer mGBuffer;
+    ID3D12Resource* mShadowMapForLighting = nullptr;
+    ID3D12Resource* mShadowOverlayForLighting = nullptr;
+    UINT mShadowCascadeCountForLighting = 0;
+
+    void CreateLightingSrvs();
 
     std::unordered_map<std::string, Microsoft::WRL::ComPtr<ID3DBlob>> mShaders;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;

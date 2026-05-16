@@ -6,7 +6,7 @@ class GBuffer
 {
 public:
     static constexpr UINT BufferCount = 4;
-    static constexpr UINT ExtraSrvCount = 2;
+    static constexpr UINT ExtraSrvCount = 3;
     static constexpr UINT TotalSrvCount = BufferCount + ExtraSrvCount;
 
     static constexpr DXGI_FORMAT AlbedoFormat = DXGI_FORMAT_R8G8B8A8_UNORM;

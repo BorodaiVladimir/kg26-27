@@ -24,7 +24,9 @@ class ShadowSystem
 public:
     static const UINT kCascadeCount = 4;
     static const UINT kShadowMapSize = 2048;
+    static const UINT kShadowOverlaySize = 512;
     static constexpr float kDefaultSplitLambda = 0.5f;
+    static constexpr float kDefaultShadowOverlayStrength = 1.0f;
 
     ShadowSystem();
     ~ShadowSystem();
@@ -54,6 +56,7 @@ public:
     void BeginPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS passCbAddress);
     void BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex);
     void EndPass(ID3D12GraphicsCommandList* cmdList);
+    void PrepareForLighting(ID3D12GraphicsCommandList* cmdList);
 
     ID3D12RootSignature* GetRootSignature() const { return mRootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return mShadowPSO.Get(); }
@@ -61,6 +64,11 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE GetShadowMapSrvGpu() const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetShadowMapSrvCpu() const;
     ID3D12Resource* GetShadowMapResource() const { return mShadowMap.Get(); }
+    ID3D12Resource* GetShadowOverlayResource() const { return mShadowOverlay.Get(); }
+
+    void UploadShadowOverlayTexture(ID3D12GraphicsCommandList* cmdList);
+    void SetShadowOverlayStrength(float strength);
+    float GetShadowOverlayStrength() const { return mShadowOverlayStrength; }
 
     void UpdateLightingConstants(DirectX::FXMVECTOR lightDirectionW);
     D3D12_GPU_VIRTUAL_ADDRESS GetLightingConstantBufferAddress() const;
@@ -75,6 +83,7 @@ private:
 
     void BuildRootSignature();
     void BuildResources();
+    void BuildShadowOverlayResource();
     void BuildPSO();
     void ComputeCascadeSplits(float nearZ, float farZ, float lambda);
     void BuildCascadeMatrices(DirectX::FXMVECTOR lightDirectionW);
@@ -111,6 +120,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap;
+    Microsoft::WRL::ComPtr<ID3D12Resource> mShadowOverlay;
+    float mShadowOverlayStrength = kDefaultShadowOverlayStrength;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mDsvHeap;
     UploadBuffer<ShadowPassConstants>* mPassCB;
     UploadBuffer<ShadowLightingConstants>* mLightingCB;

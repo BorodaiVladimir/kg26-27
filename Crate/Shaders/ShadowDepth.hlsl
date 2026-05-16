@@ -88,6 +88,15 @@ VsOut HS(InputPatch<VsOut, 3> p, uint i : SV_OutputControlPointID)
 HsPatch HSConst(InputPatch<VsOut, 3> p, uint patchId : SV_PrimitiveID)
 {
     HsPatch o;
+    if (gTessParams.w < 0.5f)
+    {
+        o.Edge[0] = 1.0f;
+        o.Edge[1] = 1.0f;
+        o.Edge[2] = 1.0f;
+        o.Inside = 1.0f;
+        return o;
+    }
+
     const float tf = (gTessParams.w > 0.5f) ? 4.0f : 1.0f;
     o.Edge[0] = tf;
     o.Edge[1] = tf;
