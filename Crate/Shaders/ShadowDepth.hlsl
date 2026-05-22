@@ -13,7 +13,6 @@ cbuffer cbShadowPass : register(b1)
     float4x4 gLightViewProj;
 };
 
-// Тот же layout до gEyePosW, что в DeferredGeometry — для совпадения tess с G-buffer.
 cbuffer cbPass : register(b3)
 {
     float4x4 gView;

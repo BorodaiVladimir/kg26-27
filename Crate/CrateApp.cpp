@@ -284,7 +284,7 @@ private:
     UINT mBillboardObjectCbIndex = 0;
     UINT mBillboardTreeSrvHeapIndex = 0;
     static constexpr UINT kMaxForestInstances = 512;
-    static constexpr size_t kMaxStressDrawsPerFrame = 400u;
+    static constexpr size_t kMaxStressDrawsPerFrame = 200u;
     static constexpr UINT kMaxPointLightsForShading = 256u;
     static constexpr float kForestLodMeshDistance = 26.0f;
     static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
@@ -356,7 +356,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
-    mSpotLights[1].Strength = { 0.0f, 0.0f, 0.0f };
+    mSpotLights[1].Strength = { 1.0f, 0.0f, 0.0f };
     mSpotLights[1].FalloffStart = 1.5f;
     mSpotLights[1].FalloffEnd = 70.0f;
     mSpotLights[1].SpotPower = 96.0f;
@@ -418,11 +418,10 @@ bool CrateApp::Initialize()
         mSrvDescriptorHeap.Get(),
         kShadowSrvHeapStartIndex,
         mCbvSrvDescriptorSize);
-    mShadowSystem->UploadShadowOverlayTexture(mCommandList.Get());
     mRenderingSystem->SetLightingResources(
         mShadowSystem->GetShadowMapResource(),
         ShadowSystem::kCascadeCount,
-        mShadowSystem->GetShadowOverlayResource());
+        mTextures["checkerTex"]->Resource.Get());
 
     mParticleSystem = std::make_unique<ParticleSystem>();
     mParticleSystem->Initialize(
@@ -528,7 +527,7 @@ void CrateApp::Update(const GameTimer& gt)
     {
         mFallingActive[0] = true;
         mFallingVelY[0] = 0.0f;
-        mPointLights[0].Position = { 6.0f, 20.0f, 0.0f };
+        mPointLights[0].Position = { 0.0f, 12.0f, 0.0f };
     }
 
     mSpawnAccumulator += gt.DeltaTime();
@@ -551,7 +550,7 @@ void CrateApp::Update(const GameTimer& gt)
             {
                 mFallingActive[i] = true;
                 mFallingVelY[i] = 0.0f;
-                mPointLights[i].Position = { 6.0f, 20.0f, 0.0f };
+                mPointLights[i].Position = { 0.0f, 12.0f, 0.0f };
                 break;
             }
         }
@@ -638,21 +637,17 @@ void CrateApp::Draw(const GameTimer& gt)
 
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
     if (!mStressVisibleRitems.empty())
-    {
-        DrawRenderItems(
-            mCommandList.Get(),
-            mStressVisibleRitems,
-            kMaxStressDrawsPerFrame);
-    }
+        DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
     DrawBillboardForest(mCommandList.Get());
-
-    mRenderingSystem->EndGeometryPass(mCommandList.Get());
 
     if (mParticleSystem)
     {
         mParticleSystem->SetEmitterPosition(XMFLOAT3(0.0f, 1.2f, 0.0f));
         mParticleSystem->Update(mCommandList.Get(), gt.DeltaTime(), gt.TotalTime());
+        mParticleSystem->Render(mCommandList.Get(), passAddress);
     }
+
+    mRenderingSystem->EndGeometryPass(mCommandList.Get());
 
     if (mShadowSystem)
         mShadowSystem->PrepareForLighting(mCommandList.Get());
@@ -2057,37 +2052,65 @@ void CrateApp::UpdateStressVisibility()
     if (mStressRitems.empty())
         return;
 
+    std::vector<size_t> visibleIndices;
+    visibleIndices.reserve(mStressRitems.size());
+
     if (!mFrustumCullEnabled)
     {
-        mStressVisibleRitems = mStressRitems;
-        return;
-    }
-
-    const XMMATRIX view = XMLoadFloat4x4(&mView);
-    const XMMATRIX proj = XMLoadFloat4x4(&mProj);
-
-    BoundingFrustum fr;
-    BoundingFrustum::CreateFromMatrix(fr, proj);
-
-    if (!mKdTreeCullingEnabled)
-    {
-        mStressVisibleRitems.reserve(mStressRitems.size());
+        visibleIndices.resize(mStressRitems.size());
         for (size_t i = 0; i < mStressRitems.size(); ++i)
+            visibleIndices[i] = i;
+    }
+    else
+    {
+        const XMMATRIX view = XMLoadFloat4x4(&mView);
+        const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+
+        BoundingFrustum fr;
+        BoundingFrustum::CreateFromMatrix(fr, proj);
+
+        if (!mKdTreeCullingEnabled)
         {
-            if (FrustumContainsOrIntersectsAABB(fr, view, mStressWorldBounds[i]))
-                mStressVisibleRitems.push_back(mStressRitems[i]);
+            for (size_t i = 0; i < mStressRitems.size(); ++i)
+            {
+                if (FrustumContainsOrIntersectsAABB(fr, view, mStressWorldBounds[i]))
+                    visibleIndices.push_back(i);
+            }
         }
-        return;
+        else
+        {
+            std::vector<int> visibleIds;
+            mKdTree.QueryVisible(mStressWorldBounds, fr, view, visibleIds);
+            visibleIndices.reserve(visibleIds.size());
+            for (int id : visibleIds)
+            {
+                if (id >= 0 && static_cast<size_t>(id) < mStressRitems.size())
+                    visibleIndices.push_back(static_cast<size_t>(id));
+            }
+        }
     }
 
-    std::vector<int> visibleIds;
-    mKdTree.QueryVisible(mStressWorldBounds, fr, view, visibleIds);
-    mStressVisibleRitems.reserve(visibleIds.size());
-    for (int id : visibleIds)
+    if (visibleIndices.size() > kMaxStressDrawsPerFrame)
     {
-        if (id >= 0 && static_cast<size_t>(id) < mStressRitems.size())
-            mStressVisibleRitems.push_back(mStressRitems[static_cast<size_t>(id)]);
+        const XMVECTOR eye = XMLoadFloat3(&mEyePos);
+        std::partial_sort(
+            visibleIndices.begin(),
+            visibleIndices.begin() + static_cast<std::ptrdiff_t>(kMaxStressDrawsPerFrame),
+            visibleIndices.end(),
+            [&](size_t ia, size_t ib)
+            {
+                const XMVECTOR ca = XMLoadFloat3(&mStressWorldBounds[ia].Center);
+                const XMVECTOR cb = XMLoadFloat3(&mStressWorldBounds[ib].Center);
+                const float da = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(ca, eye)));
+                const float db = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(cb, eye)));
+                return da < db;
+            });
+        visibleIndices.resize(kMaxStressDrawsPerFrame);
     }
+
+    mStressVisibleRitems.reserve(visibleIndices.size());
+    for (size_t index : visibleIndices)
+        mStressVisibleRitems.push_back(mStressRitems[index]);
 }
 
 void CrateApp::UpdateForestLod()
@@ -2443,6 +2466,13 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 
 void CrateApp::UpdateDeferredLightCB()
 {
+    XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
+    XMVECTOR lookAt = XMVectorZero();
+    XMVECTOR viewDir = XMVector3Normalize(lookAt - eyePos);
+
+    mSpotLights[1].Position = mEyePos;
+    XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
+
     UINT activePointLights = 0;
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
     {
@@ -2453,9 +2483,6 @@ void CrateApp::UpdateDeferredLightCB()
 
     DeferredLightParams params = {};
     params.ActivePointLightCount = mActivePointLights;
-    params.ShadowOverlayStrength = mShadowSystem
-        ? mShadowSystem->GetShadowOverlayStrength()
-        : 1.0f;
     mCurrFrameResource->DeferredLightParamsCB->CopyData(0, params);
 
     UINT dst = 0;
@@ -2472,9 +2499,7 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 1.0f;
-        XMVECTOR posW = XMLoadFloat3(&mPointLights[i].Position);
-        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
-        XMStoreFloat3(&l.Position, posV);
+        l.Position = mPointLights[i].Position;
         l.Strength = mPointLights[i].Strength;
         l.FalloffStart = mPointLights[i].FalloffStart;
         l.FalloffEnd = mPointLights[i].FalloffEnd;
@@ -2484,13 +2509,8 @@ void CrateApp::UpdateDeferredLightCB()
     {
         DeferredLightGpu l = {};
         l.Type = 2.0f;
-        XMVECTOR posW = XMLoadFloat3(&mSpotLights[i].Position);
-        XMVECTOR posV = XMVector3TransformCoord(posW, XMLoadFloat4x4(&mView));
-        XMStoreFloat3(&l.Position, posV);
-
-        XMVECTOR dirW = XMLoadFloat3(&mSpotLights[i].Direction);
-        XMVECTOR dirV = XMVector3Normalize(XMVector3TransformNormal(dirW, XMLoadFloat4x4(&mView)));
-        XMStoreFloat3(&l.Direction, dirV);
+        l.Position = mSpotLights[i].Position;
+        l.Direction = mSpotLights[i].Direction;
         l.Strength = mSpotLights[i].Strength;
         l.FalloffStart = mSpotLights[i].FalloffStart;
         l.FalloffEnd = mSpotLights[i].FalloffEnd;

@@ -1,12 +1,8 @@
 #include "ShadowSystem.h"
-#include <DirectXTex.h>
-#pragma comment(lib, "DirectXTex.lib")
 #include <Windows.h>
 #include <algorithm>
 #include <cfloat>
 #include <cstring>
-#include <string>
-#include <vector>
 
 using namespace DirectX;
 using Microsoft::WRL::ComPtr;
@@ -157,7 +153,6 @@ ShadowSystem::ShadowSystem()
     , mStableOrthoMaxY(0.0f)
     , mStableOrthoMinZ(0.0f)
     , mStableOrthoMaxZ(0.0f)
-    , mShadowOverlayStrength(kDefaultShadowOverlayStrength)
     , mPassCB(nullptr)
     , mLightingCB(nullptr)
 {
@@ -199,116 +194,7 @@ void ShadowSystem::Initialize(
 
     BuildRootSignature();
     BuildResources();
-    BuildShadowOverlayResource();
     BuildPSO();
-}
-
-namespace
-{
-bool FileExistsA(const char* path)
-{
-    const DWORD attr = GetFileAttributesA(path);
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
-}
-
-std::string GetExeDirA()
-{
-    char buf[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::string dir = buf;
-    const size_t slash = dir.find_last_of("\\/");
-    if (slash != std::string::npos)
-        dir.resize(slash + 1);
-    return dir;
-}
-
-std::string ResolveMediaPathA(const std::string& path)
-{
-    if (FileExistsA(path.c_str()))
-        return path;
-
-    std::string p = path;
-    std::replace(p.begin(), p.end(), '/', '\\');
-
-    const std::string exe = GetExeDirA();
-    const std::string tryPaths[] =
-    {
-        p,
-        path,
-        exe + p,
-        exe + "..\\" + p,
-        exe + "..\\..\\" + p,
-        std::string("..\\") + p,
-        std::string("..\\..\\") + p,
-    };
-
-    for (const std::string& candidate : tryPaths)
-    {
-        if (FileExistsA(candidate.c_str()))
-            return candidate;
-    }
-    return path;
-}
-
-bool LoadOverlayImage(const wchar_t* filePath, UINT size, std::vector<std::uint32_t>& pixels)
-{
-    DirectX::ScratchImage image;
-    DirectX::ScratchImage resized;
-    DirectX::TexMetadata metadata = {};
-    HRESULT hr = LoadFromWICFile(filePath, WIC_FLAGS_FORCE_SRGB, &metadata, image);
-    if (FAILED(hr))
-        hr = LoadFromWICFile(filePath, WIC_FLAGS_NONE, &metadata, image);
-    if (FAILED(hr))
-        hr = LoadFromDDSFile(filePath, DDS_FLAGS_NONE, &metadata, image);
-    if (FAILED(hr))
-        return false;
-
-    hr = Resize(
-        image.GetImages(),
-        image.GetImageCount(),
-        metadata,
-        size,
-        size,
-        DirectX::TEX_FILTER_LINEAR,
-        resized);
-    const DirectX::Image* img = resized.GetImage(0, 0, 0);
-    if (FAILED(hr) || !img || img->format != DXGI_FORMAT_R8G8B8A8_UNORM)
-        return false;
-
-    pixels.resize(static_cast<size_t>(size) * size);
-    for (UINT y = 0; y < size; ++y)
-    {
-        const std::uint8_t* row = img->pixels + static_cast<size_t>(y) * img->rowPitch;
-        std::memcpy(
-            pixels.data() + static_cast<size_t>(y) * size,
-            row,
-            static_cast<size_t>(size) * 4);
-    }
-    return true;
-}
-
-void FillProceduralShadowOverlay(UINT size, std::vector<std::uint32_t>& pixels)
-{
-    constexpr UINT kTile = 32u;
-    pixels.resize(static_cast<size_t>(size) * size);
-    for (UINT y = 0; y < size; ++y)
-    {
-        for (UINT x = 0; x < size; ++x)
-        {
-            const UINT tx = x / kTile;
-            const UINT ty = y / kTile;
-            const bool checker = ((tx + ty) & 1u) == 0u;
-
-            const std::uint8_t r = checker ? 98 : 62;
-            const std::uint8_t g = checker ? 98 : 62;
-            const std::uint8_t b = checker ? 108 : 68;
-
-            pixels[static_cast<size_t>(y) * size + x] =
-                (255u << 24) | (static_cast<std::uint32_t>(b) << 16) |
-                (static_cast<std::uint32_t>(g) << 8) | static_cast<std::uint32_t>(r);
-        }
-    }
-}
 }
 
 void ShadowSystem::BuildRootSignature()
@@ -406,113 +292,6 @@ void ShadowSystem::BuildResources()
     srvDesc.Texture2DArray.FirstArraySlice = 0;
     srvDesc.Texture2DArray.ArraySize = kCascadeCount;
     mDevice->CreateShaderResourceView(mShadowMap.Get(), &srvDesc, srvCpu);
-}
-
-void ShadowSystem::BuildShadowOverlayResource()
-{
-    D3D12_RESOURCE_DESC texDesc = {};
-    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texDesc.Width = kShadowOverlaySize;
-    texDesc.Height = kShadowOverlaySize;
-    texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels = 1;
-    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    texDesc.SampleDesc.Count = 1;
-    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-    auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &defaultHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &texDesc,
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        nullptr,
-        IID_PPV_ARGS(mShadowOverlay.GetAddressOf())));
-}
-
-void ShadowSystem::UploadShadowOverlayTexture(ID3D12GraphicsCommandList* cmdList)
-{
-    if (!cmdList || !mShadowOverlay)
-        return;
-
-    std::vector<std::uint32_t> pixels;
-    FillProceduralShadowOverlay(kShadowOverlaySize, pixels);
-    bool usedBuiltin = true;
-
-    static const char* kCustomOverlayCandidates[] =
-    {
-        "../Textures/checkboard.dds",
-        "Textures/checkboard.dds",
-        "Textures/ShadowOverlay.png",
-        "Textures/ShadowOverlay.dds",
-        nullptr,
-    };
-
-    for (const char* candidate : kCustomOverlayCandidates)
-    {
-        if (!candidate)
-            break;
-
-        const std::string resolved = ResolveMediaPathA(candidate);
-        const std::wstring wpath(resolved.begin(), resolved.end());
-        std::vector<std::uint32_t> filePixels;
-        if (!LoadOverlayImage(wpath.c_str(), kShadowOverlaySize, filePixels))
-            continue;
-
-        std::uint64_t lumaSum = 0;
-        for (std::uint32_t px : filePixels)
-        {
-            const std::uint32_t r = px & 0xFFu;
-            const std::uint32_t g = (px >> 8) & 0xFFu;
-            const std::uint32_t b = (px >> 16) & 0xFFu;
-            lumaSum += r + g + b;
-        }
-        const std::uint64_t avgLuma = lumaSum / (static_cast<std::uint64_t>(filePixels.size()) * 3u);
-        if (avgLuma < 48u)
-            continue;
-
-        pixels = std::move(filePixels);
-        usedBuiltin = false;
-        char msg[384];
-        sprintf_s(msg, "Shadow overlay: loaded %s\n", resolved.c_str());
-        OutputDebugStringA(msg);
-        break;
-    }
-
-    if (usedBuiltin)
-        OutputDebugStringA("Shadow overlay: built-in high-contrast pattern\n");
-
-    D3D12_SUBRESOURCE_DATA subresource = {};
-    subresource.pData = pixels.data();
-    subresource.RowPitch = static_cast<LONG_PTR>(kShadowOverlaySize) * 4;
-    subresource.SlicePitch = static_cast<LONG_PTR>(kShadowOverlaySize) * kShadowOverlaySize * 4;
-
-    const UINT64 uploadSize = GetRequiredIntermediateSize(mShadowOverlay.Get(), 0, 1);
-    auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-    auto uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
-
-    ComPtr<ID3D12Resource> uploadBuffer;
-    ThrowIfFailed(mDevice->CreateCommittedResource(
-        &uploadHeap,
-        D3D12_HEAP_FLAG_NONE,
-        &uploadDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(uploadBuffer.GetAddressOf())));
-
-    UpdateSubresources(cmdList, mShadowOverlay.Get(), uploadBuffer.Get(), 0, 0, 1, &subresource);
-
-    const auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        mShadowOverlay.Get(),
-        D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmdList->ResourceBarrier(1, &barrier);
-}
-
-void ShadowSystem::SetShadowOverlayStrength(float strength)
-{
-    mShadowOverlayStrength = std::clamp(strength, 0.0f, 1.0f);
 }
 
 void ShadowSystem::BuildPSO()
@@ -696,6 +475,20 @@ void ShadowSystem::BuildCascadeMatrices(FXMVECTOR lightDirectionW)
 
         SnapOrthoBoundsToTexelGrid(minX, maxX, minY, maxY, static_cast<float>(kShadowMapSize));
 
+        constexpr float kMinOrthoExtent = 0.25f;
+        if (maxX - minX < kMinOrthoExtent)
+        {
+            const float midX = 0.5f * (minX + maxX);
+            minX = midX - kMinOrthoExtent * 0.5f;
+            maxX = midX + kMinOrthoExtent * 0.5f;
+        }
+        if (maxY - minY < kMinOrthoExtent)
+        {
+            const float midY = 0.5f * (minY + maxY);
+            minY = midY - kMinOrthoExtent * 0.5f;
+            maxY = midY + kMinOrthoExtent * 0.5f;
+        }
+
         if (useStableSceneZ)
         {
             minZ = mStableOrthoMinZ;
@@ -829,9 +622,9 @@ void ShadowSystem::UpdateLightingConstants(FXMVECTOR lightDirectionW)
 
     cb.CascadeSplits = XMFLOAT4(
         mCascadeSplitsViewZ[0],
-        kCascadeCount > 1 ? mCascadeSplitsViewZ[1] : mCameraFarZ,
-        mCameraFarZ,
-        mCameraFarZ);
+        mCascadeSplitsViewZ[1],
+        mCascadeSplitsViewZ[2],
+        mCascadeSplitsViewZ[3]);
 
     XMStoreFloat3(&cb.LightDirectionW, XMVector3Normalize(lightDirectionW));
     cb.ShadowMapInvSize = { 1.0f / kShadowMapSize, 1.0f / kShadowMapSize };

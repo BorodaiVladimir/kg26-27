@@ -57,6 +57,5 @@ struct DeferredLightGpu
 struct DeferredLightParams
 {
     std::uint32_t ActivePointLightCount = 0;
-    float ShadowOverlayStrength = 1.0f;
-    DirectX::XMFLOAT2 Padding = { 0.0f, 0.0f };
+    DirectX::XMFLOAT3 Padding = { 0.0f, 0.0f, 0.0f };
 };

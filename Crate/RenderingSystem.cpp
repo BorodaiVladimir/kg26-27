@@ -69,11 +69,11 @@ void RenderingSystem::CreateLightingSrvs()
     if (mShadowOverlayForLighting)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC overlaySrvDesc = {};
-        overlaySrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        overlaySrvDesc.Format = mShadowOverlayForLighting->GetDesc().Format;
         overlaySrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         overlaySrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         overlaySrvDesc.Texture2D.MostDetailedMip = 0;
-        overlaySrvDesc.Texture2D.MipLevels = 1;
+        overlaySrvDesc.Texture2D.MipLevels = mShadowOverlayForLighting->GetDesc().MipLevels;
         mDevice->CreateShaderResourceView(
             mShadowOverlayForLighting,
             &overlaySrvDesc,
@@ -315,9 +315,9 @@ void RenderingSystem::BuildLightingRootSignature()
     samplers[2].Init(
         2,
         D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+        D3D12_TEXTURE_ADDRESS_MODE_WRAP,
         0.0f,
         1,
         D3D12_COMPARISON_FUNC_NEVER,

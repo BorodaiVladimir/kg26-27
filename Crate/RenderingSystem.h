@@ -72,8 +72,8 @@ private:
 
     GBuffer mGBuffer;
     ID3D12Resource* mShadowMapForLighting = nullptr;
-    ID3D12Resource* mShadowOverlayForLighting = nullptr;
     UINT mShadowCascadeCountForLighting = 0;
+    ID3D12Resource* mShadowOverlayForLighting = nullptr;
 
     void CreateLightingSrvs();
 

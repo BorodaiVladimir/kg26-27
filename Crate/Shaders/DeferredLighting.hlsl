@@ -6,7 +6,7 @@ Texture2DArray gShadowMap : register(t5);
 Texture2D gShadowOverlay : register(t6);
 SamplerState gsamPointClamp : register(s0);
 SamplerComparisonState gsamShadow : register(s1);
-SamplerState gsamOverlayClamp : register(s2);
+SamplerState gsamOverlayWrap : register(s2);
 
 #define NUM_DIR_LIGHTS 1
 #define NUM_POINT_LIGHTS 256
@@ -36,8 +36,7 @@ cbuffer cbPass : register(b1)
 cbuffer cbDeferredParams : register(b2)
 {
     uint gActivePointLights;
-    float gShadowOverlayStrength;
-    float2 gDeferredPad;
+    float3 gDeferredPad;
 }
 
 cbuffer cbShadow : register(b3)
@@ -71,12 +70,6 @@ struct VSOut
     float2 TexC : TEXCOORD;
 };
 
-struct ShadowEval
-{
-    float Factor;
-    float2 OverlayUV;
-};
-
 VSOut VS(uint id : SV_VertexID)
 {
     VSOut vout;
@@ -85,6 +78,16 @@ VSOut VS(uint id : SV_VertexID)
     vout.TexC = pos;
     vout.PosH = float4(pos * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
     return vout;
+}
+
+bool IsSurfacePixel(float3 posW)
+{
+    return dot(posW, posW) > 1e-4f;
+}
+
+bool IsParticlePixel(float materialRoughness)
+{
+    return materialRoughness < 0.0f;
 }
 
 float GetViewDepth(float3 posW)
@@ -109,23 +112,17 @@ uint SelectCascade(float viewDepth)
     return cascade;
 }
 
-float2 ShadowUVFromPosW(uint cascade, float3 samplePosW)
-{
-    float4 shadowH = mul(float4(samplePosW, 1.0f), gLightViewProj[cascade]);
-    shadowH.xyz /= max(shadowH.w, 1e-6f);
-    return shadowH.xy * float2(0.5f, -0.5f) + float2(0.5f, 0.5f);
-}
-
-float SampleShadowCascade(uint cascade, float3 samplePosW, float3 biasNormal, out float2 overlayUV)
+float SampleShadowCascade(uint cascade, float3 samplePosW, float3 biasNormal)
 {
     float3 lightDir = normalize(-gLightDirectionW);
     float ndotl = saturate(dot(biasNormal, lightDir));
 
-    overlayUV = ShadowUVFromPosW(cascade, samplePosW);
-
-    const float depthBias = 0.0001f + 0.0005f * (1.0f - ndotl);
     float4 shadowH = mul(float4(samplePosW, 1.0f), gLightViewProj[cascade]);
     shadowH.xyz /= max(shadowH.w, 1e-6f);
+
+    float2 shadowUV = shadowH.xy * float2(0.5f, -0.5f) + float2(0.5f, 0.5f);
+
+    const float depthBias = 0.0001f + 0.0005f * (1.0f - ndotl);
     const float depth = saturate(shadowH.z - depthBias);
 
     float shadow = 0.0f;
@@ -136,18 +133,14 @@ float SampleShadowCascade(uint cascade, float3 samplePosW, float3 biasNormal, ou
         for (int x = -1; x <= 1; ++x)
         {
             float2 offset = float2(x, y) * gShadowMapInvSize;
-            shadow += gShadowMap.SampleCmp(gsamShadow, float3(overlayUV + offset, (float)cascade), depth).r;
+            shadow += gShadowMap.SampleCmp(gsamShadow, float3(shadowUV + offset, (float)cascade), depth).r;
         }
     }
     return shadow / 9.0f;
 }
 
-ShadowEval EvalShadow(float3 posW, float3 shadingNormalW)
+float CalcShadowFactor(float3 posW, float3 shadingNormalW)
 {
-    ShadowEval result;
-    result.Factor = 1.0f;
-    result.OverlayUV = float2(0.5f, 0.5f);
-
     const float viewDepth = GetViewDepth(posW);
     const uint cascade = SelectCascade(viewDepth);
 
@@ -155,8 +148,22 @@ ShadowEval EvalShadow(float3 posW, float3 shadingNormalW)
     float ndotl = saturate(dot(shadingNormalW, lightDir));
     float3 samplePosW = posW + shadingNormalW * (0.0006f * (1.0f - ndotl) + 0.00015f);
 
-    result.Factor = SampleShadowCascade(cascade, samplePosW, shadingNormalW, result.OverlayUV);
-    return result;
+    float shadow = SampleShadowCascade(cascade, samplePosW, shadingNormalW);
+
+    if (cascade > 0u)
+    {
+        const float prevSplit = gCascadeSplits[cascade - 1u];
+        const float blendWidth = max(prevSplit * 0.08f, 0.35f);
+        const float blendStart = prevSplit - blendWidth;
+        const float t = saturate((viewDepth - blendStart) / max(blendWidth, 1e-4f));
+        if (t < 1.0f)
+        {
+            const float shadowPrev = SampleShadowCascade(cascade - 1u, samplePosW, shadingNormalW);
+            shadow = lerp(shadowPrev, shadow, t);
+        }
+    }
+
+    return shadow;
 }
 
 float3 ComputeDirectional(
@@ -194,30 +201,6 @@ float3 ComputePoint(DeferredLightGpu lightSrc, float3 posW, float3 normal, float
     return result;
 }
 
-float3 SampleShadowOverlayColor(float2 shadowUV)
-{
-    const float3 texRgb = gShadowOverlay.Sample(gsamOverlayClamp, shadowUV).rgb;
-    if (dot(texRgb, float3(0.299f, 0.587f, 0.114f)) > 0.04f)
-        return texRgb;
-
-    const float2 p = shadowUV * 4.0f;
-    const float2 cell = floor(p);
-    const bool checker = fmod(cell.x + cell.y, 2.0f) < 1.0f;
-    return checker ? float3(0.38f, 0.38f, 0.42f) : float3(0.24f, 0.24f, 0.26f);
-}
-
-bool IsValidGBufferSurface(float4 albedo, float4 posData)
-{
-    const float viewZ = abs(posData.w);
-    return viewZ > 1e-2f && dot(albedo.rgb, float3(1.0f, 1.0f, 1.0f)) > 0.02f;
-}
-
-bool IsShadowMapUVInBounds(float2 shadowUV)
-{
-    return shadowUV.x >= 0.02f && shadowUV.x <= 0.98f &&
-           shadowUV.y >= 0.02f && shadowUV.y <= 0.98f;
-}
-
 float3 ComputeSpot(DeferredLightGpu lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
 {
     float3 result = 0.0f;
@@ -245,51 +228,57 @@ float4 PS(VSOut pin) : SV_Target
     float4 material = gMaterial.Sample(gsamPointClamp, uv);
     float4 posData = gPosition.Sample(gsamPointClamp, uv);
     float3 posW = posData.xyz;
+
+    if (!IsSurfacePixel(posW))
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+
     float3 toEye = normalize(gEyePosW - posW);
     float3 fresnelR0 = material.xyz;
-    float roughness = material.w;
+    const bool isParticle = IsParticlePixel(material.w);
+    const float roughness = isParticle ? 0.55f : material.w;
 
-    const ShadowEval shadow = EvalShadow(posW, normal);
+    const float shadowFactor = CalcShadowFactor(posW, normal);
 
-    const float3 ambientPart = gAmbientLight.rgb * albedo.rgb;
-    float3 dirPart = 0.0f;
-    float3 otherLights = 0.0f;
+    float3 lighting = gAmbientLight.rgb * albedo.rgb;
 
     [unroll]
     for (int dirLi = 0; dirLi < NUM_DIR_LIGHTS; ++dirLi)
     {
-        dirPart += ComputeDirectional(gLights[dirLi], normal, toEye, albedo.rgb, fresnelR0, roughness, shadow.Factor);
+        lighting += ComputeDirectional(gLights[dirLi], normal, toEye, albedo.rgb, fresnelR0, roughness, shadowFactor);
     }
 
     const int activePointCount = min((int)gActivePointLights, NUM_POINT_LIGHTS);
     for (int ptLi = 0; ptLi < activePointCount; ++ptLi)
     {
-        otherLights += ComputePoint(gLights[NUM_DIR_LIGHTS + ptLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputePoint(gLights[NUM_DIR_LIGHTS + ptLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
     [unroll]
     for (int spLi = 0; spLi < NUM_SPOT_LIGHTS; ++spLi)
     {
-        otherLights += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + spLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + spLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
     }
 
-    float3 lighting = ambientPart + dirPart + otherLights;
-
-    if (!IsValidGBufferSurface(albedo, posData))
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
-
-    const float shadowAmt = saturate(1.0f - shadow.Factor);
-    const float overlayStrength = saturate(gShadowOverlayStrength);
-    if (shadowAmt > 0.35f && overlayStrength > 0.0f && IsShadowMapUVInBounds(shadow.OverlayUV))
+    if (!isParticle)
     {
-        const float3 projectedTex = SampleShadowOverlayColor(shadow.OverlayUV);
-        const float3 projectedOnSurface = albedo.rgb * projectedTex;
+        const float shadowAmt = saturate(1.0f - shadowFactor);
+        const float overlayBlend = smoothstep(0.78f, 0.92f, shadowAmt);
+        if (overlayBlend > 0.001f)
+        {
+            const float2 overlayUV = floor(posW.xz * 0.06f * 48.0f) / 48.0f;
+            const float3 overlay = gShadowOverlay.Sample(gsamOverlayWrap, overlayUV).rgb;
 
-        const float3 shadowSurface =
-            ambientPart + otherLights + projectedOnSurface * 0.55f;
+            const float overlayAmbScale = lerp(0.5f, 1.0f, shadowFactor);
+            float3 overlayLit = gAmbientLight.rgb * overlay * overlayAmbScale;
+            [unroll]
+            for (int ovLi = 0; ovLi < NUM_DIR_LIGHTS; ++ovLi)
+            {
+                overlayLit += ComputeDirectional(
+                    gLights[ovLi], normal, toEye, overlay, fresnelR0, roughness, shadowFactor);
+            }
 
-        const float mask = saturate((shadowAmt - 0.35f) * 10.0f) * overlayStrength;
-        lighting = lerp(lighting, shadowSurface, mask);
+            lighting = lerp(lighting, overlayLit, overlayBlend);
+        }
     }
 
     return float4(lighting, albedo.a);
