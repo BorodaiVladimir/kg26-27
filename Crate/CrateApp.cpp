@@ -173,6 +173,7 @@ private:
     void BuildDescriptorHeaps();
     void BuildShadersAndInputLayout();
     void LoadOBJModels();
+    void LoadSlendermanModel();
     void LoadTreeLodMesh();
     void BuildPSOs();
     void BuildFrameResources();
@@ -246,6 +247,14 @@ private:
     std::map<std::string, int> mTextureCache;
     std::map<std::string, int> mMaterialToHeapIndex;
     std::map<std::string, int> mMaterialToBumpHeapIndex;
+    std::map<std::string, XMFLOAT4> mSlendermanMaterialAlbedo;
+
+    bool mHasSlenderman = false;
+    XMFLOAT3 mSlendermanWorldCenter = { 0.0f, 0.0f, 0.0f };
+    static constexpr float kSlendermanVcrNearDist = 10.0f;
+    static constexpr float kSlendermanVcrFarDist = 42.0f;
+    static constexpr float kSlendermanVcrMin = 0.35f;
+    static constexpr float kSlendermanVcrMax = 1.0f;
 
     PassConstants mMainPassCB;
 
@@ -400,6 +409,7 @@ bool CrateApp::Initialize()
     LoadTextures();
     BuildDescriptorHeaps();
     LoadOBJModels();
+    LoadSlendermanModel();
     LoadTreeLodMesh();
     LoadBillboardTreeTexture();
     CreateWaterPlaneGeometry();
@@ -1355,6 +1365,137 @@ void CrateApp::LoadOBJModels()
     OutputDebugStringA("========================================\n\n");
 }
 
+void CrateApp::LoadSlendermanModel()
+{
+    mSlendermanMaterialAlbedo.clear();
+    mHasSlenderman = false;
+
+    const char* tryPaths[] = {
+        "../Models/slenderman.obj",
+        "../Models/slenderman/slenderman.obj"
+    };
+
+    Assimp::Importer importer;
+    const aiScene* scene = nullptr;
+    for (const char* path : tryPaths)
+    {
+        scene = importer.ReadFile(path,
+            aiProcess_Triangulate |
+            aiProcess_FlipUVs |
+            aiProcess_GenNormals |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_ImproveCacheLocality);
+
+        if (scene && scene->mRootNode && (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) == 0)
+        {
+            OutputDebugStringA("Slenderman model loaded.\n");
+            break;
+        }
+        scene = nullptr;
+    }
+
+    if (!scene)
+    {
+        OutputDebugStringA("Slenderman: model not found, skipping.\n");
+        return;
+    }
+
+    for (unsigned int m = 0; m < scene->mNumMaterials; ++m)
+    {
+        aiMaterial* material = scene->mMaterials[m];
+        aiString matName;
+        if (material->Get(AI_MATKEY_NAME, matName) != AI_SUCCESS)
+            continue;
+
+        aiColor3D kd(0.8f, 0.8f, 0.8f);
+        material->Get(AI_MATKEY_COLOR_DIFFUSE, kd);
+
+        const std::string key = std::string("slender_") + matName.C_Str();
+        mSlendermanMaterialAlbedo[key] = XMFLOAT4(kd.r, kd.g, kd.b, 1.0f);
+    }
+
+    LoadedModel model;
+    model.Name = "Slenderman";
+
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+
+    for (unsigned int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx)
+    {
+        aiMesh* mesh = scene->mMeshes[meshIdx];
+        const uint32_t startIndex = indexOffset;
+
+        for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
+        {
+            Vertex v = {};
+            v.Pos = { mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z };
+            if (mesh->HasNormals())
+                v.Normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
+            if (mesh->HasTextureCoords(0))
+                v.TexC = { mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y };
+            model.Vertices.push_back(v);
+        }
+
+        for (unsigned int i = 0; i < mesh->mNumFaces; ++i)
+        {
+            const aiFace& face = mesh->mFaces[i];
+            for (unsigned int j = 0; j < face.mNumIndices; ++j)
+                model.Indices.push_back(face.mIndices[j] + vertexOffset);
+        }
+
+        std::string materialName = "slender_default";
+        if (mesh->mMaterialIndex >= 0)
+        {
+            aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+            aiString matName;
+            if (material->Get(AI_MATKEY_NAME, matName) == AI_SUCCESS)
+                materialName = std::string("slender_") + matName.C_Str();
+        }
+
+        SubmeshData submesh;
+        submesh.MaterialName = materialName;
+        submesh.Geometry.StartIndexLocation = startIndex;
+        submesh.Geometry.IndexCount = mesh->mNumFaces * 3;
+        submesh.Geometry.BaseVertexLocation = 0;
+        model.Submeshes.push_back(submesh);
+
+        vertexOffset += mesh->mNumVertices;
+        indexOffset += mesh->mNumFaces * 3;
+    }
+
+    if (model.Vertices.empty() || model.Submeshes.empty())
+    {
+        OutputDebugStringA("Slenderman: empty mesh data.\n");
+        return;
+    }
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = model.Name;
+
+    const UINT vbByteSize = (UINT)model.Vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)model.Indices.size() * sizeof(uint32_t);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), model.Vertices.data(), vbByteSize, geo->VertexBufferUploader);
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), model.Indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    for (size_t i = 0; i < model.Submeshes.size(); ++i)
+    {
+        const std::string submeshName = "submesh_" + std::to_string(i) + "_" + model.Submeshes[i].MaterialName;
+        geo->DrawArgs[submeshName] = model.Submeshes[i].Geometry;
+    }
+
+    mGeometries[geo->Name] = std::move(geo);
+    mLoadedModels.push_back(std::move(model));
+    mHasSlenderman = true;
+}
+
 void CrateApp::LoadTreeLodMesh()
 {
     mTreeLodMeshLoaded = false;
@@ -1798,6 +1939,22 @@ void CrateApp::BuildMaterials()
         OutputDebugStringA(msg);
     }
 
+    for (const auto& entry : mSlendermanMaterialAlbedo)
+    {
+        auto material = std::make_unique<Material>();
+        material->Name = entry.first;
+        material->MatCBIndex = (int)mMaterials.size();
+        material->DiffuseSrvHeapIndex = 0;
+        material->DiffuseSrvHeapIndex2 = 0;
+        material->NormalSrvHeapIndex = 0;
+        material->DiffuseAlbedo = entry.second;
+        material->FresnelR0 = XMFLOAT3(0.04f, 0.04f, 0.04f);
+        material->Roughness = 0.85f;
+        material->TessellationParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        material->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        mMaterials[entry.first] = std::move(material);
+    }
+
     auto water = std::make_unique<Material>();
     water->Name = "water";
     water->MatCBIndex = (int)mMaterials.size();
@@ -1919,6 +2076,78 @@ void CrateApp::BuildRenderItems()
 
         initTexTransforms(renderItem.get());
         mAllRitems.push_back(std::move(renderItem));
+    }
+
+    if (mHasSlenderman)
+    {
+        auto slenderGeo = mGeometries["Slenderman"].get();
+        const LoadedModel* slenderModel = nullptr;
+        for (const auto& m : mLoadedModels)
+        {
+            if (m.Name == "Slenderman")
+            {
+                slenderModel = &m;
+                break;
+            }
+        }
+
+        if (slenderGeo && slenderModel)
+        {
+            // Center of billboard forest patch (see kForestPatchCenter*).
+            constexpr float slenderScale = 1.05f;
+            const float slenderX = kForestPatchCenterX;
+            const float slenderZ = kForestPatchCenterZ;
+            const float slenderY = -1.0f - (-0.635447f) * slenderScale;
+
+            const XMMATRIX slenderWorld =
+                XMMatrixScaling(slenderScale, slenderScale, slenderScale) *
+                XMMatrixRotationY(0.0f) *
+                XMMatrixTranslation(slenderX, slenderY, slenderZ);
+
+            XMVECTOR center = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
+            for (const Vertex& v : slenderModel->Vertices)
+                center = XMVectorAdd(center, XMLoadFloat3(&v.Pos));
+            center = XMVectorScale(center, 1.0f / (float)slenderModel->Vertices.size());
+            center = XMVector3TransformCoord(center, slenderWorld);
+            XMStoreFloat3(&mSlendermanWorldCenter, center);
+
+            for (size_t i = 0; i < slenderModel->Submeshes.size(); ++i)
+            {
+                const auto& submesh = slenderModel->Submeshes[i];
+                const std::string submeshName = "submesh_" + std::to_string(i) + "_" + submesh.MaterialName;
+                auto drawArg = slenderGeo->DrawArgs.find(submeshName);
+                if (drawArg == slenderGeo->DrawArgs.end())
+                    continue;
+
+                auto renderItem = std::make_unique<RenderItem>();
+                renderItem->ObjCBIndex = objIndex++;
+
+                auto matIt = mMaterials.find(submesh.MaterialName);
+                renderItem->Mat = matIt != mMaterials.end() ? matIt->second.get() : mMaterials["woodCrate"].get();
+
+                renderItem->Geo = slenderGeo;
+                renderItem->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+                renderItem->IndexCount = drawArg->second.IndexCount;
+                renderItem->StartIndexLocation = drawArg->second.StartIndexLocation;
+                renderItem->BaseVertexLocation = drawArg->second.BaseVertexLocation;
+
+                XMStoreFloat4x4(&renderItem->World, slenderWorld);
+                renderItem->AnimateTexture = false;
+                renderItem->TextureScaleU = 1.0f;
+                renderItem->TextureScaleV = 1.0f;
+                initTexTransforms(renderItem.get());
+                mAllRitems.push_back(std::move(renderItem));
+            }
+
+            char slenderMsg[128];
+            sprintf_s(
+                slenderMsg,
+                "Slenderman placed at center (%.1f, %.1f, %.1f)\n",
+                mSlendermanWorldCenter.x,
+                mSlendermanWorldCenter.y,
+                mSlendermanWorldCenter.z);
+            OutputDebugStringA(slenderMsg);
+        }
     }
 
     BuildStressTestObjects(objIndex);
@@ -2522,7 +2751,27 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 void CrateApp::UpdatePostProcessCB()
 {
     PostProcessConstants post = {};
-    post.EdgeAndPost = { 0.95f, 0.10f, 0.65f, 1.0f };
+    float vcrIntensity = 0.65f;
+    float vignetteStrength = 1.0f;
+
+    if (mHasSlenderman && mVcrPostEnabled)
+    {
+        const float dx = mEyePos.x - mSlendermanWorldCenter.x;
+        const float dy = mEyePos.y - mSlendermanWorldCenter.y;
+        const float dz = mEyePos.z - mSlendermanWorldCenter.z;
+        const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+
+        const float range = kSlendermanVcrFarDist - kSlendermanVcrNearDist;
+        const float proximity = (range > 1e-3f)
+            ? (kSlendermanVcrFarDist - dist) / range
+            : 0.0f;
+        const float t = (std::max)(0.0f, (std::min)(proximity, 1.0f));
+
+        vcrIntensity = kSlendermanVcrMin + (kSlendermanVcrMax - kSlendermanVcrMin) * t;
+        vignetteStrength = 0.55f + 0.45f * t;
+    }
+
+    post.EdgeAndPost = { 0.95f, 0.10f, vcrIntensity, vignetteStrength };
     post.EnableFlags = {
         mEdgePostEnabled ? 1.0f : 0.0f,
         mVcrPostEnabled ? 1.0f : 0.0f,
