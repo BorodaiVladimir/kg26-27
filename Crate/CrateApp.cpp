@@ -164,6 +164,7 @@ private:
     void UpdateObjectCBs(const GameTimer& gt);
     void UpdateMaterialCBs(const GameTimer& gt);
     void UpdateMainPassCB(const GameTimer& gt);
+    void UpdatePostProcessCB();
     void UpdateDeferredLightCB();
 
     void LoadTextures();
@@ -269,6 +270,10 @@ private:
 
     bool mGeometryWireframe = false;
     bool mF3KeyDown = false;
+    bool mEdgePostEnabled = true;
+    bool mVcrPostEnabled = true;
+    bool mF6KeyDown = false;
+    bool mF7KeyDown = false;
 
     std::vector<TreeInstanceGpu> mForestInstancesCpu;
     ComPtr<ID3D12Resource> mForestMeshUpload;
@@ -373,11 +378,13 @@ std::wstring CrateApp::GetFrameStatsExtra() const
     wchar_t buf[320];
     swprintf_s(
         buf,
-        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s",
+        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s",
         mStressVisibleRitems.size(),
         mStressRitems.size(),
         mFrustumCullEnabled ? L"on" : L"off",
-        mKdTreeCullingEnabled ? L"on" : L"off");
+        mKdTreeCullingEnabled ? L"on" : L"off",
+        mEdgePostEnabled ? L"on" : L"off",
+        mVcrPostEnabled ? L"on" : L"off");
     return buf;
 }
 
@@ -473,6 +480,42 @@ void CrateApp::Update(const GameTimer& gt)
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
+
+    const SHORT f6State = GetAsyncKeyState(VK_F6);
+    if ((f6State & 0x8000) != 0)
+    {
+        if (!mF6KeyDown)
+        {
+            mEdgePostEnabled = !mEdgePostEnabled;
+            mF6KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "Edge post-process: %s\n", mEdgePostEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF6KeyDown = false;
+    }
+
+    const SHORT f7State = GetAsyncKeyState(VK_F7);
+    if ((f7State & 0x8000) != 0)
+    {
+        if (!mF7KeyDown)
+        {
+            mVcrPostEnabled = !mVcrPostEnabled;
+            mF7KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "VCR post-process: %s\n", mVcrPostEnabled ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF7KeyDown = false;
+    }
+
+    UpdatePostProcessCB();
 
     const SHORT f3State = GetAsyncKeyState(VK_F3);
     if ((f3State & 0x8000) != 0)
@@ -679,6 +722,18 @@ void CrateApp::Draw(const GameTimer& gt)
             passAddress,
             mGeometryWireframe);
         DrawRenderItems(mCommandList.Get(), mWaterRitems);
+    }
+
+    if (mEdgePostEnabled || mVcrPostEnabled)
+    {
+        mRenderingSystem->ExecutePostProcessPasses(
+            mCommandList.Get(),
+            CurrentBackBuffer(),
+            CurrentBackBufferView(),
+            passAddress,
+            mCurrFrameResource->PostProcessCB->Resource()->GetGPUVirtualAddress(),
+            mEdgePostEnabled,
+            mVcrPostEnabled);
     }
 
     transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -2462,6 +2517,18 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
 
     auto currPassCB = mCurrFrameResource->PassCB.get();
     currPassCB->CopyData(0, mMainPassCB);
+}
+
+void CrateApp::UpdatePostProcessCB()
+{
+    PostProcessConstants post = {};
+    post.EdgeAndPost = { 0.95f, 0.10f, 0.65f, 1.0f };
+    post.EnableFlags = {
+        mEdgePostEnabled ? 1.0f : 0.0f,
+        mVcrPostEnabled ? 1.0f : 0.0f,
+        0.0f,
+        0.0f };
+    mCurrFrameResource->PostProcessCB->CopyData(0, post);
 }
 
 void CrateApp::UpdateDeferredLightCB()

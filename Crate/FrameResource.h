@@ -12,6 +12,12 @@ struct ObjectConstants
     DirectX::XMFLOAT4X4 TexTransformDisp = MathHelper::Identity4x4();
 };
 
+struct PostProcessConstants
+{
+    DirectX::XMFLOAT4 EdgeAndPost = { 0.95f, 0.10f, 0.65f, 1.0f };
+    DirectX::XMFLOAT4 EnableFlags = { 1.0f, 1.0f, 0.0f, 0.0f };
+};
+
 struct PassConstants
 {
     DirectX::XMFLOAT4X4 View = MathHelper::Identity4x4();
@@ -53,5 +59,6 @@ public:
     std::unique_ptr<UploadBuffer<DeferredLightParams>> DeferredLightParamsCB;
     std::unique_ptr<UploadBuffer<MaterialConstants>> MaterialCB;
     std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB;
+    std::unique_ptr<UploadBuffer<PostProcessConstants>> PostProcessCB;
     UINT64 Fence = 0;
 };

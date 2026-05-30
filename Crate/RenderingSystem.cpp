@@ -23,9 +23,11 @@ void RenderingSystem::Initialize(
     BuildGeometryRootSignature();
     BuildBillboardRootSignature();
     BuildLightingRootSignature();
+    BuildPostProcessRootSignature();
     BuildShadersAndInputLayout();
     BuildBillboardShadersAndLayout();
     BuildPSOs();
+    BuildPostProcessResources();
 }
 
 void RenderingSystem::OnResize(UINT width, UINT height)
@@ -33,6 +35,7 @@ void RenderingSystem::OnResize(UINT width, UINT height)
     mWidth = width;
     mHeight = height;
     mGBuffer.OnResize(width, height);
+    BuildPostProcessResources();
 }
 
 void RenderingSystem::SetLightingResources(
@@ -357,6 +360,10 @@ void RenderingSystem::BuildShadersAndInputLayout()
     mShaders["deferredLightVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["deferredLightPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "PS", "ps_5_0");
 
+    mShaders["postVS"] = d3dUtil::CompileShader(L"Shaders\\PostProcess.hlsl", nullptr, "VS", "vs_5_0");
+    mShaders["postEdgePS"] = d3dUtil::CompileShader(L"Shaders\\PostProcess.hlsl", nullptr, "PS_Edge", "ps_5_0");
+    mShaders["postVcrPS"] = d3dUtil::CompileShader(L"Shaders\\PostProcess.hlsl", nullptr, "PS_VCR", "ps_5_0");
+
     mShaders["waterTransparentVS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["waterTransparentHS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "HS", "hs_5_0");
     mShaders["waterTransparentDS"] = d3dUtil::CompileShader(L"Shaders\\WaterTransparent.hlsl", nullptr, "DS", "ds_5_0");
@@ -565,6 +572,272 @@ void RenderingSystem::BuildPSOs()
     treeMeshPsoDesc.SampleDesc.Quality = 0;
     treeMeshPsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&treeMeshPsoDesc, IID_PPV_ARGS(&mTreeMeshInstancedPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC postPsoDesc = {};
+    postPsoDesc.InputLayout = { nullptr, 0 };
+    postPsoDesc.pRootSignature = mPostProcessRootSignature.Get();
+    postPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["postVS"]->GetBufferPointer()),
+        mShaders["postVS"]->GetBufferSize()
+    };
+    postPsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    postPsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+    postPsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+    postPsoDesc.DepthStencilState.DepthEnable = false;
+    postPsoDesc.DepthStencilState.StencilEnable = false;
+    postPsoDesc.SampleMask = UINT_MAX;
+    postPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    postPsoDesc.NumRenderTargets = 1;
+    postPsoDesc.RTVFormats[0] = mBackBufferFormat;
+    postPsoDesc.SampleDesc.Count = 1;
+    postPsoDesc.SampleDesc.Quality = 0;
+    postPsoDesc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+
+    postPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["postEdgePS"]->GetBufferPointer()),
+        mShaders["postEdgePS"]->GetBufferSize()
+    };
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&postPsoDesc, IID_PPV_ARGS(&mEdgePostPSO)));
+
+    postPsoDesc.PS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["postVcrPS"]->GetBufferPointer()),
+        mShaders["postVcrPS"]->GetBufferSize()
+    };
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&postPsoDesc, IID_PPV_ARGS(&mVcrPostPSO)));
+}
+
+void RenderingSystem::BuildPostProcessRootSignature()
+{
+    CD3DX12_DESCRIPTOR_RANGE sceneSrv;
+    sceneSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+    CD3DX12_DESCRIPTOR_RANGE normalSrv;
+    normalSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1);
+    CD3DX12_DESCRIPTOR_RANGE positionSrv;
+    positionSrv.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);
+
+    CD3DX12_ROOT_PARAMETER slotRootParameter[5];
+    slotRootParameter[0].InitAsDescriptorTable(1, &sceneSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[1].InitAsDescriptorTable(1, &normalSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[2].InitAsDescriptorTable(1, &positionSrv, D3D12_SHADER_VISIBILITY_PIXEL);
+    slotRootParameter[3].InitAsConstantBufferView(0);
+    slotRootParameter[4].InitAsConstantBufferView(1);
+
+    CD3DX12_STATIC_SAMPLER_DESC pointClamp(
+        0,
+        D3D12_FILTER_MIN_MAG_MIP_POINT,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+        D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+    CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(
+        _countof(slotRootParameter),
+        slotRootParameter,
+        1,
+        &pointClamp,
+        D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+    ComPtr<ID3DBlob> serializedRootSig = nullptr;
+    ComPtr<ID3DBlob> errorBlob = nullptr;
+    ThrowIfFailed(D3D12SerializeRootSignature(
+        &rootSigDesc,
+        D3D_ROOT_SIGNATURE_VERSION_1,
+        serializedRootSig.GetAddressOf(),
+        errorBlob.GetAddressOf()));
+
+    ThrowIfFailed(mDevice->CreateRootSignature(
+        0,
+        serializedRootSig->GetBufferPointer(),
+        serializedRootSig->GetBufferSize(),
+        IID_PPV_ARGS(mPostProcessRootSignature.GetAddressOf())));
+}
+
+void RenderingSystem::BuildPostProcessResources()
+{
+    if (!mDevice || mWidth == 0 || mHeight == 0)
+        return;
+
+    mPostSceneCopy.Reset();
+    mPostTempTarget.Reset();
+    mPostRtvHeap.Reset();
+
+    auto createColorTarget = [&](ComPtr<ID3D12Resource>& outTex)
+    {
+        D3D12_RESOURCE_DESC texDesc = {};
+        texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texDesc.Width = mWidth;
+        texDesc.Height = mHeight;
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels = 1;
+        texDesc.Format = mBackBufferFormat;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.SampleDesc.Quality = 0;
+        texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+        const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        CD3DX12_CLEAR_VALUE clearValue(mBackBufferFormat, clearColor);
+        CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+        ThrowIfFailed(mDevice->CreateCommittedResource(
+            &defaultHeap,
+            D3D12_HEAP_FLAG_NONE,
+            &texDesc,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            &clearValue,
+            IID_PPV_ARGS(&outTex)));
+    };
+
+    createColorTarget(mPostSceneCopy);
+    createColorTarget(mPostTempTarget);
+
+    mPostRtvDescriptorSize = mDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+    rtvHeapDesc.NumDescriptors = 2;
+    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    ThrowIfFailed(mDevice->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mPostRtvHeap)));
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(mPostRtvHeap->GetCPUDescriptorHandleForHeapStart());
+    mDevice->CreateRenderTargetView(mPostSceneCopy.Get(), nullptr, rtvHandle);
+    rtvHandle.Offset(1, mPostRtvDescriptorSize);
+    mDevice->CreateRenderTargetView(mPostTempTarget.Get(), nullptr, rtvHandle);
+
+    CreatePostProcessSrvs();
+}
+
+void RenderingSystem::CreatePostProcessSrvs()
+{
+    if (!mDevice || !mPostSceneCopy || !mPostTempTarget)
+        return;
+
+    UINT srvDescriptorSize = mDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = mBackBufferFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MostDetailedMip = 0;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    mDevice->CreateShaderResourceView(
+        mPostSceneCopy.Get(),
+        &srvDesc,
+        mGBuffer.GetSrvCpu(GBuffer::PostSceneSrvIndex));
+
+    mDevice->CreateShaderResourceView(
+        mPostTempTarget.Get(),
+        &srvDesc,
+        mGBuffer.GetSrvCpu(GBuffer::PostTempSrvIndex));
+}
+
+void RenderingSystem::CopyBackBufferToScene(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* backBuffer)
+{
+    auto toCopyDest = CD3DX12_RESOURCE_BARRIER::Transition(
+        mPostSceneCopy.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+    auto toCopySource = CD3DX12_RESOURCE_BARRIER::Transition(
+        backBuffer,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,
+        D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_RESOURCE_BARRIER barriers[2] = { toCopyDest, toCopySource };
+    cmdList->ResourceBarrier(2, barriers);
+
+    cmdList->CopyResource(mPostSceneCopy.Get(), backBuffer);
+
+    std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
+    std::swap(barriers[1].Transition.StateBefore, barriers[1].Transition.StateAfter);
+    cmdList->ResourceBarrier(2, barriers);
+}
+
+void RenderingSystem::ExecutePostProcessPasses(
+    ID3D12GraphicsCommandList* cmdList,
+    ID3D12Resource* backBuffer,
+    D3D12_CPU_DESCRIPTOR_HANDLE backBufferRtv,
+    D3D12_GPU_VIRTUAL_ADDRESS passCbAddress,
+    D3D12_GPU_VIRTUAL_ADDRESS postCbAddress,
+    bool enableEdge,
+    bool enableVcr)
+{
+    if (!enableEdge && !enableVcr)
+        return;
+
+    if (!mPostSceneCopy || !mPostTempTarget)
+        return;
+
+    CopyBackBufferToScene(cmdList, backBuffer);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.Width = static_cast<float>(mWidth);
+    viewport.Height = static_cast<float>(mHeight);
+    viewport.MaxDepth = 1.0f;
+    D3D12_RECT scissor = { 0, 0, static_cast<LONG>(mWidth), static_cast<LONG>(mHeight) };
+    cmdList->RSSetViewports(1, &viewport);
+    cmdList->RSSetScissorRects(1, &scissor);
+
+    ID3D12DescriptorHeap* heap = mGBuffer.GetSrvHeap();
+    cmdList->SetDescriptorHeaps(1, &heap);
+
+    cmdList->SetGraphicsRootSignature(mPostProcessRootSignature.Get());
+    cmdList->SetGraphicsRootConstantBufferView(3, postCbAddress);
+    cmdList->SetGraphicsRootConstantBufferView(4, passCbAddress);
+    cmdList->SetGraphicsRootDescriptorTable(1, mGBuffer.GetSrvGpu(1));
+    cmdList->SetGraphicsRootDescriptorTable(2, mGBuffer.GetSrvGpu(3));
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE postSceneRtv(mPostRtvHeap->GetCPUDescriptorHandleForHeapStart());
+    CD3DX12_CPU_DESCRIPTOR_HANDLE postTempRtv(postSceneRtv);
+    postTempRtv.Offset(1, mPostRtvDescriptorSize);
+
+    const auto drawFullscreen = [&](
+        ID3D12PipelineState* pso,
+        D3D12_GPU_DESCRIPTOR_HANDLE sceneSrv,
+        ID3D12Resource* renderTarget,
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+        bool transitionTarget)
+    {
+        if (transitionTarget)
+        {
+            auto toRtv = CD3DX12_RESOURCE_BARRIER::Transition(
+                renderTarget,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdList->ResourceBarrier(1, &toRtv);
+        }
+
+        cmdList->OMSetRenderTargets(1, &rtv, false, nullptr);
+        cmdList->SetPipelineState(pso);
+        cmdList->SetGraphicsRootDescriptorTable(0, sceneSrv);
+        cmdList->DrawInstanced(3, 1, 0, 0);
+
+        if (transitionTarget)
+        {
+            auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+                renderTarget,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList->ResourceBarrier(1, &toSrv);
+        }
+    };
+
+    D3D12_GPU_DESCRIPTOR_HANDLE sceneSrv = mGBuffer.GetSrvGpu(GBuffer::PostSceneSrvIndex);
+    D3D12_GPU_DESCRIPTOR_HANDLE tempSrv = mGBuffer.GetSrvGpu(GBuffer::PostTempSrvIndex);
+
+    if (enableEdge && enableVcr)
+    {
+        drawFullscreen(mEdgePostPSO.Get(), sceneSrv, mPostTempTarget.Get(), postTempRtv, true);
+        drawFullscreen(mVcrPostPSO.Get(), tempSrv, backBuffer, backBufferRtv, false);
+    }
+    else if (enableEdge)
+    {
+        drawFullscreen(mEdgePostPSO.Get(), sceneSrv, backBuffer, backBufferRtv, false);
+    }
+    else
+    {
+        drawFullscreen(mVcrPostPSO.Get(), sceneSrv, backBuffer, backBufferRtv, false);
+    }
 }
 
 void RenderingSystem::BeginTransparentWaterPass(
