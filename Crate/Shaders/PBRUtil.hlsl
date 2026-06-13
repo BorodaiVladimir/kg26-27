@@ -21,10 +21,33 @@ float DistributionGGX(float3 N, float3 H, float roughness)
     return a2 / max(denom, 1e-4f);
 }
 
+float DistributionBeckmann(float3 N, float3 H, float roughness)
+{
+    float a = max(roughness * roughness, 1e-4f);
+    float NdotH = saturate(dot(N, H));
+    float NdotH2 = NdotH * NdotH;
+    float tan2 = (1.0f - NdotH2) / max(NdotH2, 1e-4f);
+    return exp(-tan2 / a) / (PBR_PI * a * NdotH2 * NdotH2);
+}
+
+float DistributionNDF(float3 N, float3 H, float roughness, float useBeckmann)
+{
+    if (useBeckmann > 0.5f)
+        return DistributionBeckmann(N, H, roughness);
+    return DistributionGGX(N, H, roughness);
+}
+
 float GeometrySchlickGGX(float NdotV, float roughness)
 {
     float r = roughness + 1.0f;
     float k = (r * r) / 8.0f;
+    return NdotV / max(NdotV * (1.0f - k) + k, 1e-4f);
+}
+
+float GeometrySchlickBeckmann(float NdotV, float roughness)
+{
+    float a = roughness * roughness;
+    float k = a / 2.0f;
     return NdotV / max(NdotV * (1.0f - k) + k, 1e-4f);
 }
 
@@ -35,6 +58,22 @@ float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
     float ggx1 = GeometrySchlickGGX(NdotV, roughness);
     float ggx2 = GeometrySchlickGGX(NdotL, roughness);
     return ggx1 * ggx2;
+}
+
+float GeometrySmithBeckmann(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = saturate(dot(N, V));
+    float NdotL = saturate(dot(N, L));
+    float g1 = GeometrySchlickBeckmann(NdotV, roughness);
+    float g2 = GeometrySchlickBeckmann(NdotL, roughness);
+    return g1 * g2;
+}
+
+float GeometrySmithNDF(float3 N, float3 V, float3 L, float roughness, float useBeckmann)
+{
+    if (useBeckmann > 0.5f)
+        return GeometrySmithBeckmann(N, V, L, roughness);
+    return GeometrySmith(N, V, L, roughness);
 }
 
 float3 FresnelSchlick(float cosTheta, float3 F0)
@@ -62,7 +101,8 @@ float3 ComputePbrRadiance(
     float metallic,
     float roughness,
     float attenuation,
-    float shadowFactor)
+    float shadowFactor,
+    float useBeckmann)
 {
     float3 H = normalize(V + L);
     float NdotL = saturate(dot(N, L));
@@ -70,8 +110,8 @@ float3 ComputePbrRadiance(
     float VdotH = saturate(dot(V, H));
 
     float3 F0 = ComputeF0(albedo, metallic);
-    float D = DistributionGGX(N, H, roughness);
-    float G = GeometrySmith(N, V, L, roughness);
+    float D = DistributionNDF(N, H, roughness, useBeckmann);
+    float G = GeometrySmithNDF(N, V, L, roughness, useBeckmann);
     float3 F = FresnelSchlick(VdotH, F0);
 
     float3 numerator = D * G * F;

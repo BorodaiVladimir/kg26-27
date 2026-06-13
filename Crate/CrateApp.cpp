@@ -573,6 +573,8 @@ private:
     bool mEnableIbl = true;
     float mIblMaxReflectionLod = 4.0f;
     bool mF8KeyDown = false;
+    bool mUseBeckmannDistribution = false;
+    bool mF9KeyDown = false;
     bool mHasSlenderman = false;
     XMFLOAT3 mSlendermanWorldCenter = { 0.0f, 0.0f, 0.0f };
     static constexpr float kSlendermanVcrNearDist = 10.0f;
@@ -718,7 +720,7 @@ std::wstring CrateApp::GetFrameStatsExtra() const
     wchar_t buf[320];
     swprintf_s(
         buf,
-        L"   stress draw: %zu / %zu   pbr wood:%s   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s F8 ibl:%s",
+        L"   stress draw: %zu / %zu   pbr wood:%s   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s F8 ibl:%s F9 ndf:%s",
         mStressVisibleRitems.size(),
         mStressRitems.size(),
         mHasPbrWoodRoot ? L"on" : L"off",
@@ -726,7 +728,8 @@ std::wstring CrateApp::GetFrameStatsExtra() const
         mKdTreeCullingEnabled ? L"on" : L"off",
         mEdgePostEnabled ? L"on" : L"off",
         mVcrPostEnabled ? L"on" : L"off",
-        mIblTexturesLoaded ? (mEnableIbl ? L"on" : L"off") : L"missing");
+        mIblTexturesLoaded ? (mEnableIbl ? L"on" : L"off") : L"missing",
+        mUseBeckmannDistribution ? L"beckmann" : L"ggx");
     return buf;
 }
 
@@ -883,6 +886,23 @@ void CrateApp::Update(const GameTimer& gt)
     else
     {
         mF8KeyDown = false;
+    }
+
+    const SHORT f9State = GetAsyncKeyState(VK_F9);
+    if ((f9State & 0x8000) != 0)
+    {
+        if (!mF9KeyDown)
+        {
+            mUseBeckmannDistribution = !mUseBeckmannDistribution;
+            mF9KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "NDF distribution: %s\n", mUseBeckmannDistribution ? "BECKMANN" : "GGX");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF9KeyDown = false;
     }
 
     UpdatePostProcessCB();
@@ -4090,6 +4110,7 @@ void CrateApp::UpdateDeferredLightCB()
     params.ActivePointLightCount = mActivePointLights;
     params.EnableIbl = (mIblTexturesLoaded && mEnableIbl) ? 1.0f : 0.0f;
     params.IblMaxReflectionLod = mIblMaxReflectionLod;
+    params.UseBeckmannDistribution = mUseBeckmannDistribution ? 1.0f : 0.0f;
     mCurrFrameResource->DeferredLightParamsCB->CopyData(0, params);
 
     UINT dst = 0;

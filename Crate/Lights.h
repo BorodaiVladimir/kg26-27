@@ -59,5 +59,5 @@ struct DeferredLightParams
     std::uint32_t ActivePointLightCount = 0;
     float EnableIbl = 1.0f;
     float IblMaxReflectionLod = 4.0f;
-    float Padding = 0.0f;
+    float UseBeckmannDistribution = 0.0f;
 };

@@ -44,7 +44,7 @@ cbuffer cbDeferredParams : register(b2)
     uint gActivePointLights;
     float gEnableIbl;
     float gIblMaxReflectionLod;
-    float gDeferredPad;
+    float gUseBeckmannDistribution;
 }
 
 cbuffer cbShadow : register(b3)
@@ -193,7 +193,8 @@ float3 ComputeDirectionalPbr(
         metallic,
         roughness,
         1.0f,
-        shadowFactor);
+        shadowFactor,
+        gUseBeckmannDistribution);
 }
 
 float3 ComputePointPbr(
@@ -221,7 +222,8 @@ float3 ComputePointPbr(
         metallic,
         roughness,
         att,
-        1.0f);
+        1.0f,
+        gUseBeckmannDistribution);
 }
 
 float3 ComputeSpotPbr(
@@ -250,7 +252,8 @@ float3 ComputeSpotPbr(
         metallic,
         roughness,
         att * spot,
-        1.0f);
+        1.0f,
+        gUseBeckmannDistribution);
 }
 
 float4 PS(VSOut pin) : SV_Target
