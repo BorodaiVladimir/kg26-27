@@ -37,6 +37,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;

@@ -122,7 +122,7 @@ GBufferOut PSMain(GSOut pin)
     o.Albedo = float4(pin.Col.rgb, 1.0f);
     o.Normal = float4(n * 0.5f + 0.5f, 1.0f);
     // material.w < 0 marks particles for deferred lighting (skip shadow overlay).
-    o.Material = float4(0.04f, 0.04f, 0.04f, -1.0f);
+    o.Material = float4(0.0f, 0.55f, 1.0f, -1.0f);
     float3 posV = mul(float4(pin.PosW, 1.0f), gView).xyz;
     o.Position = float4(pin.PosW, posV.z);
     return o;

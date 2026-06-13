@@ -189,7 +189,6 @@ float4 PS_VCR(VSOut pin) : SV_Target
     float luma = dot(color.rgb, float3(0.299f, 0.587f, 0.114f));
     color.rgb = lerp(color.rgb, float3(luma, luma, luma), 0.07f * intensity);
 
-    // ��������
     float vignette = 1.0f - smoothstep(0.22f, 0.82f, dist);
     vignette = lerp(0.06f, 1.0f, saturate(vignette));
     vignette = pow(vignette, 1.25f);

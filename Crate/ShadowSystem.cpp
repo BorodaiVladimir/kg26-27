@@ -153,8 +153,6 @@ ShadowSystem::ShadowSystem()
     , mStableOrthoMaxY(0.0f)
     , mStableOrthoMinZ(0.0f)
     , mStableOrthoMaxZ(0.0f)
-    , mPassCB(nullptr)
-    , mLightingCB(nullptr)
 {
     for (UINT i = 0; i < kCascadeCount; ++i)
         mCascadeSplitsViewZ[i] = 0.0f;
@@ -167,10 +165,13 @@ ShadowSystem::ShadowSystem()
 
 ShadowSystem::~ShadowSystem()
 {
-    delete mPassCB;
-    mPassCB = nullptr;
-    delete mLightingCB;
-    mLightingCB = nullptr;
+    for (UINT i = 0; i < kShadowFrameResourceCount; ++i)
+    {
+        delete mPassCB[i];
+        mPassCB[i] = nullptr;
+        delete mLightingCB[i];
+        mLightingCB[i] = nullptr;
+    }
 }
 
 void ShadowSystem::Initialize(
@@ -185,10 +186,13 @@ void ShadowSystem::Initialize(
     mDescriptorSize = descriptorSize;
     mDsvDescriptorSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
-    delete mPassCB;
-    delete mLightingCB;
-    mPassCB = new UploadBuffer<ShadowPassConstants>(device, 1, true);
-    mLightingCB = new UploadBuffer<ShadowLightingConstants>(device, 1, true);
+    for (UINT i = 0; i < kShadowFrameResourceCount; ++i)
+    {
+        delete mPassCB[i];
+        delete mLightingCB[i];
+        mPassCB[i] = new UploadBuffer<ShadowPassConstants>(device, 1, true);
+        mLightingCB[i] = new UploadBuffer<ShadowLightingConstants>(device, 1, true);
+    }
     mShadowViewport = { 0.0f, 0.0f, (float)kShadowMapSize, (float)kShadowMapSize, 0.0f, 1.0f };
     mShadowScissorRect = { 0, 0, (LONG)kShadowMapSize, (LONG)kShadowMapSize };
 
@@ -576,22 +580,28 @@ void ShadowSystem::BeginPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTU
     cmdList->RSSetScissorRects(1, &mShadowScissorRect);
 }
 
-void ShadowSystem::BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex)
+void ShadowSystem::BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex, UINT frameIndex)
 {
+    const UINT slot = (std::min)(frameIndex, kShadowFrameResourceCount - 1u);
     CD3DX12_CPU_DESCRIPTOR_HANDLE dsv(mDsvHeap->GetCPUDescriptorHandleForHeapStart(), cascadeIndex, mDsvDescriptorSize);
     cmdList->OMSetRenderTargets(0, nullptr, false, &dsv);
     cmdList->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     ShadowPassConstants cb = {};
     cb.LightViewProj = mCascadeLightViewProj[cascadeIndex];
-    mPassCB->CopyData(0, cb);
-    cmdList->SetGraphicsRootConstantBufferView(1, mPassCB->Resource()->GetGPUVirtualAddress());
+    mPassCB[slot]->CopyData(0, cb);
+    cmdList->SetGraphicsRootConstantBufferView(1, mPassCB[slot]->Resource()->GetGPUVirtualAddress());
 }
 
 void ShadowSystem::EndPass(ID3D12GraphicsCommandList* cmdList)
 {
     cmdList->OMSetRenderTargets(0, nullptr, false, nullptr);
     TransitionShadowMap(cmdList, ShadowMapState::ShaderResource);
+}
+
+void ShadowSystem::MarkShadowMapShaderResource()
+{
+    mShadowMapState = ShadowMapState::ShaderResource;
 }
 
 void ShadowSystem::PrepareForLighting(ID3D12GraphicsCommandList* cmdList)
@@ -614,8 +624,9 @@ D3D12_CPU_DESCRIPTOR_HANDLE ShadowSystem::GetShadowMapSrvCpu() const
     return h;
 }
 
-void ShadowSystem::UpdateLightingConstants(FXMVECTOR lightDirectionW)
+void ShadowSystem::UpdateLightingConstants(FXMVECTOR lightDirectionW, UINT frameIndex)
 {
+    const UINT slot = (std::min)(frameIndex, kShadowFrameResourceCount - 1u);
     ShadowLightingConstants cb = {};
     for (UINT i = 0; i < kCascadeCount; ++i)
         cb.LightViewProj[i] = mCascadeLightViewProj[i];
@@ -630,10 +641,11 @@ void ShadowSystem::UpdateLightingConstants(FXMVECTOR lightDirectionW)
     cb.ShadowMapInvSize = { 1.0f / kShadowMapSize, 1.0f / kShadowMapSize };
     cb.CameraNearZ = mCameraNearZ;
     cb.CameraFarZ = mCameraFarZ;
-    mLightingCB->CopyData(0, cb);
+    mLightingCB[slot]->CopyData(0, cb);
 }
 
-D3D12_GPU_VIRTUAL_ADDRESS ShadowSystem::GetLightingConstantBufferAddress() const
+D3D12_GPU_VIRTUAL_ADDRESS ShadowSystem::GetLightingConstantBufferAddress(UINT frameIndex) const
 {
-    return mLightingCB->Resource()->GetGPUVirtualAddress();
+    const UINT slot = (std::min)(frameIndex, kShadowFrameResourceCount - 1u);
+    return mLightingCB[slot] ? mLightingCB[slot]->Resource()->GetGPUVirtualAddress() : 0;
 }

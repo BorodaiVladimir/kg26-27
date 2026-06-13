@@ -6,11 +6,19 @@ class GBuffer
 {
 public:
     static constexpr UINT BufferCount = 4;
-    static constexpr UINT ExtraLightingSrvCount = 3;
+    static constexpr UINT LightBufferSrvCount = 3;
+    static constexpr UINT StaticLightingSrvCount = 5;
+    static constexpr UINT ExtraLightingSrvCount = LightBufferSrvCount + StaticLightingSrvCount;
     static constexpr UINT ExtraPostSrvCount = 2;
     static constexpr UINT ExtraSrvCount = ExtraLightingSrvCount + ExtraPostSrvCount;
+    static constexpr UINT LightBufferSrvBaseIndex = BufferCount;
+    static constexpr UINT ShadowMapSrvIndex = BufferCount + LightBufferSrvCount;
+    static constexpr UINT ShadowOverlaySrvIndex = ShadowMapSrvIndex + 1;
+    static constexpr UINT IrradianceSrvIndex = ShadowOverlaySrvIndex + 1;
+    static constexpr UINT PrefilterEnvSrvIndex = IrradianceSrvIndex + 1;
+    static constexpr UINT IntegrationSrvIndex = PrefilterEnvSrvIndex + 1;
     static constexpr UINT PostSceneSrvIndex = BufferCount + ExtraLightingSrvCount;
-    static constexpr UINT PostTempSrvIndex = BufferCount + ExtraLightingSrvCount + 1;
+    static constexpr UINT PostTempSrvIndex = PostSceneSrvIndex + 1;
     static constexpr UINT TotalSrvCount = BufferCount + ExtraSrvCount;
 
     static constexpr DXGI_FORMAT AlbedoFormat = DXGI_FORMAT_R8G8B8A8_UNORM;

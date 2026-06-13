@@ -1,5 +1,6 @@
 #include "d3dApp.h"
 #include <WindowsX.h>
+#include <dxgi1_6.h>
 
 using Microsoft::WRL::ComPtr;
 using namespace std;
@@ -417,11 +418,45 @@ bool D3DApp::InitDirect3D()
 
 	ThrowIfFailed(CreateDXGIFactory1(IID_PPV_ARGS(&mdxgiFactory)));
 
-	// Try to create hardware device.
-	HRESULT hardwareResult = D3D12CreateDevice(
-		nullptr,             // default adapter
-		D3D_FEATURE_LEVEL_12_0,
-		IID_PPV_ARGS(&md3dDevice));
+	HRESULT hardwareResult = E_FAIL;
+	ComPtr<IDXGIFactory6> factory6;
+	if (SUCCEEDED(mdxgiFactory.As(&factory6)))
+	{
+		ComPtr<IDXGIAdapter1> highPerfAdapter;
+		if (SUCCEEDED(factory6->EnumAdapterByGpuPreference(
+			0,
+			DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+			IID_PPV_ARGS(&highPerfAdapter))))
+		{
+			hardwareResult = D3D12CreateDevice(
+				highPerfAdapter.Get(),
+				D3D_FEATURE_LEVEL_12_0,
+				IID_PPV_ARGS(&md3dDevice));
+
+			if (SUCCEEDED(hardwareResult))
+			{
+				DXGI_ADAPTER_DESC1 desc = {};
+				highPerfAdapter->GetDesc1(&desc);
+				std::wstring text = L"D3D12: high-performance adapter: ";
+				text += desc.Description;
+				text += L"\n";
+				OutputDebugStringW(text.c_str());
+			}
+			else
+			{
+				md3dDevice.Reset();
+			}
+		}
+	}
+
+	// Try default adapter if high-performance selection failed.
+	if (FAILED(hardwareResult))
+	{
+		hardwareResult = D3D12CreateDevice(
+			nullptr,
+			D3D_FEATURE_LEVEL_12_0,
+			IID_PPV_ARGS(&md3dDevice));
+	}
 
 	// Fallback to WARP device.
 	if(FAILED(hardwareResult))

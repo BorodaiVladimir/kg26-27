@@ -47,6 +47,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;
@@ -84,7 +86,7 @@ VsOut VS(VertexIn vin, uint instId : SV_InstanceID)
     float3 center = gTreeInstances[instId].WorldPos;
     float dist = distance(center, gEyePosW);
 
-    float mipLod = dist < 18.0f ? 0.0f : (dist < 40.0f ? 1.0f : 2.0f);
+    float mipLod = saturate((dist - 10.0f) / 45.0f) * 2.0f;
 
     float3 posW = center + vin.PosL;
     float3 normalW = normalize(vin.NormalL);
@@ -104,10 +106,16 @@ GBufferOut PS(VsOut pin)
 {
     GBufferOut gout;
 
-    float4 samp = gDiffuseMap.SampleLevel(gsamLinear, pin.TexC, pin.MipLod) * gDiffuseAlbedo;
-    // Не режем по той же маске, что билборд: UV меша из OBJ почти никогда не совпадают с развёрткой
-    // карточки — иначе при приближении весь меш исчезает (прозрачные участки атласа).
-    float3 albedoRgb = samp.rgb;
+    float3 albedoRgb;
+    if (gChessboard.w >= 0.5f)
+    {
+        albedoRgb = gDiffuseAlbedo.rgb;
+    }
+    else
+    {
+        float4 samp = gDiffuseMap.SampleLevel(gsamLinear, pin.TexC, pin.MipLod) * gDiffuseAlbedo;
+        albedoRgb = samp.rgb;
+    }
 
     float3 n = pin.NormalW;
     const float nl = dot(n, n);
@@ -117,7 +125,7 @@ GBufferOut PS(VsOut pin)
         n = normalize(n);
     gout.Albedo = float4(albedoRgb, 1.0f);
     gout.Normal = float4(n * 0.5f + 0.5f, 1.0f);
-    gout.Material = float4(gFresnelR0, saturate(gRoughness));
+    gout.Material = float4(saturate(gMetallic), saturate(gRoughness), 1.0f, 1.0f);
     gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

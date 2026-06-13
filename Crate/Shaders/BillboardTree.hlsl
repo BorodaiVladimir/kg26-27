@@ -45,6 +45,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;
@@ -83,7 +85,7 @@ VsOut VS(VertexIn vin, uint instId : SV_InstanceID)
     float dist = distance(center, gEyePosW);
     float scale;
     float mipLod;
-    
+
     if (dist < 22.0f)
     {
         scale = 2.4f;
@@ -92,12 +94,12 @@ VsOut VS(VertexIn vin, uint instId : SV_InstanceID)
     else if (dist < 50.0f)
     {
         scale = 1.7f;
-        mipLod = 1.5f;
+        mipLod = 1.0f;
     }
     else
     {
         scale = 1.15f;
-        mipLod = 3.0f;
+        mipLod = 2.0f;
     }
 
     float3 toCam = gEyePosW - center;
@@ -131,7 +133,7 @@ GBufferOut PS(VsOut pin)
     float3 n = normalize(pin.NormalW);
     gout.Albedo = float4(albedo.rgb, 1.0f);
     gout.Normal = float4(n * 0.5f + 0.5f, 1.0f);
-    gout.Material = float4(gFresnelR0, saturate(gRoughness));
+    gout.Material = float4(saturate(gMetallic), saturate(gRoughness), 1.0f, 1.0f);
     gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

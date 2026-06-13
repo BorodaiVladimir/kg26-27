@@ -4,9 +4,15 @@ Texture2D gMaterial : register(t2);
 Texture2D gPosition : register(t3);
 Texture2DArray gShadowMap : register(t5);
 Texture2D gShadowOverlay : register(t6);
+TextureCube gIrradianceMap : register(t7);
+TextureCube gPrefilterEnvMap : register(t8);
+Texture2D gIntegrationMap : register(t9);
 SamplerState gsamPointClamp : register(s0);
 SamplerComparisonState gsamShadow : register(s1);
 SamplerState gsamOverlayWrap : register(s2);
+SamplerState gsamLinearClamp : register(s3);
+
+#include "PBRUtil.hlsl"
 
 #define NUM_DIR_LIGHTS 1
 #define NUM_POINT_LIGHTS 256
@@ -36,7 +42,9 @@ cbuffer cbPass : register(b1)
 cbuffer cbDeferredParams : register(b2)
 {
     uint gActivePointLights;
-    float3 gDeferredPad;
+    float gEnableIbl;
+    float gIblMaxReflectionLod;
+    float gDeferredPad;
 }
 
 cbuffer cbShadow : register(b3)
@@ -85,9 +93,9 @@ bool IsSurfacePixel(float3 posW)
     return dot(posW, posW) > 1e-4f;
 }
 
-bool IsParticlePixel(float materialRoughness)
+bool IsParticlePixel(float materialFlags)
 {
-    return materialRoughness < 0.0f;
+    return materialFlags < 0.0f;
 }
 
 float GetViewDepth(float3 posW)
@@ -166,58 +174,83 @@ float CalcShadowFactor(float3 posW, float3 shadingNormalW)
     return shadow;
 }
 
-float3 ComputeDirectional(
+float3 ComputeDirectionalPbr(
     DeferredLightGpu lightSrc,
     float3 normalW,
     float3 toEye,
-    float3 diffuse,
-    float3 fresnelR0,
+    float3 albedo,
+    float metallic,
     float roughness,
     float shadowFactor)
 {
     float3 lightVec = normalize(-lightSrc.Direction);
-    float ndotl = saturate(dot(normalW, lightVec));
-    float3 h = normalize(lightVec + toEye);
-    float spec = pow(saturate(dot(normalW, h)), lerp(64.0f, 4.0f, roughness));
-    float3 specColor = fresnelR0 * spec;
-    return (diffuse + specColor) * lightSrc.Strength * ndotl * shadowFactor;
+    return ComputePbrRadiance(
+        lightSrc.Strength,
+        lightVec,
+        normalW,
+        toEye,
+        albedo,
+        metallic,
+        roughness,
+        1.0f,
+        shadowFactor);
 }
 
-float3 ComputePoint(DeferredLightGpu lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
+float3 ComputePointPbr(
+    DeferredLightGpu lightSrc,
+    float3 posW,
+    float3 normal,
+    float3 toEye,
+    float3 albedo,
+    float metallic,
+    float roughness)
 {
-    float3 result = 0.0f;
     float3 toLight = lightSrc.Position - posW;
     float dist = length(toLight);
     if (dist > lightSrc.FalloffEnd)
-        return result;
+        return 0.0f;
 
     float3 lightVec = toLight / max(dist, 1e-4f);
     float att = saturate((lightSrc.FalloffEnd - dist) / (lightSrc.FalloffEnd - lightSrc.FalloffStart));
-    float ndotl = saturate(dot(normal, lightVec));
-    float3 h = normalize(lightVec + toEye);
-    float spec = pow(saturate(dot(normal, h)), lerp(64.0f, 4.0f, roughness));
-    float3 specColor = fresnelR0 * spec;
-    result = (diffuse + specColor) * lightSrc.Strength * ndotl * att;
-    return result;
+    return ComputePbrRadiance(
+        lightSrc.Strength,
+        lightVec,
+        normal,
+        toEye,
+        albedo,
+        metallic,
+        roughness,
+        att,
+        1.0f);
 }
 
-float3 ComputeSpot(DeferredLightGpu lightSrc, float3 posW, float3 normal, float3 toEye, float3 diffuse, float3 fresnelR0, float roughness)
+float3 ComputeSpotPbr(
+    DeferredLightGpu lightSrc,
+    float3 posW,
+    float3 normal,
+    float3 toEye,
+    float3 albedo,
+    float metallic,
+    float roughness)
 {
-    float3 result = 0.0f;
     float3 toLight = lightSrc.Position - posW;
     float dist = length(toLight);
     if (dist > lightSrc.FalloffEnd)
-        return result;
+        return 0.0f;
 
     float3 lightVec = toLight / max(dist, 1e-4f);
     float att = saturate((lightSrc.FalloffEnd - dist) / (lightSrc.FalloffEnd - lightSrc.FalloffStart));
     float spot = pow(saturate(dot(normalize(lightSrc.Direction), -lightVec)), lightSrc.SpotPower);
-    float ndotl = saturate(dot(normal, lightVec));
-    float3 h = normalize(lightVec + toEye);
-    float spec = pow(saturate(dot(normal, h)), lerp(64.0f, 4.0f, roughness));
-    float3 specColor = fresnelR0 * spec;
-    result = (diffuse + specColor) * lightSrc.Strength * ndotl * att * spot;
-    return result;
+    return ComputePbrRadiance(
+        lightSrc.Strength,
+        lightVec,
+        normal,
+        toEye,
+        albedo,
+        metallic,
+        roughness,
+        att * spot,
+        1.0f);
 }
 
 float4 PS(VSOut pin) : SV_Target
@@ -233,30 +266,57 @@ float4 PS(VSOut pin) : SV_Target
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
 
     float3 toEye = normalize(gEyePosW - posW);
-    float3 fresnelR0 = material.xyz;
     const bool isParticle = IsParticlePixel(material.w);
-    const float roughness = isParticle ? 0.55f : material.w;
+    const float metallic = isParticle ? 0.0f : material.r;
+    const float roughness = isParticle ? 0.55f : material.g;
 
     const float shadowFactor = CalcShadowFactor(posW, normal);
 
-    float3 lighting = gAmbientLight.rgb * albedo.rgb;
+    float3 ambient = gAmbientLight.rgb * albedo.rgb;
+    if (gEnableIbl > 0.5f)
+    {
+        AmbientIbl ibl = ComputeAmbientIBLEx(
+            gIrradianceMap,
+            gPrefilterEnvMap,
+            gIntegrationMap,
+            gsamLinearClamp,
+            normal,
+            toEye,
+            albedo.rgb,
+            metallic,
+            roughness,
+            gIblMaxReflectionLod);
+        // Diffuse IBL stays tied to scene ambient; specular env reflections stay at full strength.
+        ambient = ibl.Diffuse * gAmbientLight.rgb + ibl.Specular * 1.35f;
+    }
+
+    float3 lighting = ambient;
 
     [unroll]
     for (int dirLi = 0; dirLi < NUM_DIR_LIGHTS; ++dirLi)
     {
-        lighting += ComputeDirectional(gLights[dirLi], normal, toEye, albedo.rgb, fresnelR0, roughness, shadowFactor);
+        lighting += ComputeDirectionalPbr(
+            gLights[dirLi], normal, toEye, albedo.rgb, metallic, roughness, shadowFactor);
     }
 
     const int activePointCount = min((int)gActivePointLights, NUM_POINT_LIGHTS);
     for (int ptLi = 0; ptLi < activePointCount; ++ptLi)
     {
-        lighting += ComputePoint(gLights[NUM_DIR_LIGHTS + ptLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputePointPbr(
+            gLights[NUM_DIR_LIGHTS + ptLi], posW, normal, toEye, albedo.rgb, metallic, roughness);
     }
 
     [unroll]
     for (int spLi = 0; spLi < NUM_SPOT_LIGHTS; ++spLi)
     {
-        lighting += ComputeSpot(gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + spLi], posW, normal, toEye, albedo.rgb, fresnelR0, roughness);
+        lighting += ComputeSpotPbr(
+            gLights[NUM_DIR_LIGHTS + NUM_POINT_LIGHTS + spLi],
+            posW,
+            normal,
+            toEye,
+            albedo.rgb,
+            metallic,
+            roughness);
     }
 
     if (!isParticle)
@@ -270,11 +330,27 @@ float4 PS(VSOut pin) : SV_Target
 
             const float overlayAmbScale = lerp(0.5f, 1.0f, shadowFactor);
             float3 overlayLit = gAmbientLight.rgb * overlay * overlayAmbScale;
+            if (gEnableIbl > 0.5f)
+            {
+                AmbientIbl overlayIbl = ComputeAmbientIBLEx(
+                    gIrradianceMap,
+                    gPrefilterEnvMap,
+                    gIntegrationMap,
+                    gsamLinearClamp,
+                    normal,
+                    toEye,
+                    overlay,
+                    metallic,
+                    roughness,
+                    gIblMaxReflectionLod);
+                overlayLit = overlayIbl.Diffuse * gAmbientLight.rgb * overlayAmbScale
+                    + overlayIbl.Specular * overlayAmbScale;
+            }
             [unroll]
             for (int ovLi = 0; ovLi < NUM_DIR_LIGHTS; ++ovLi)
             {
-                overlayLit += ComputeDirectional(
-                    gLights[ovLi], normal, toEye, overlay, fresnelR0, roughness, shadowFactor);
+                overlayLit += ComputeDirectionalPbr(
+                    gLights[ovLi], normal, toEye, overlay, metallic, roughness, shadowFactor);
             }
 
             lighting = lerp(lighting, overlayLit, overlayBlend);

@@ -57,5 +57,7 @@ struct DeferredLightGpu
 struct DeferredLightParams
 {
     std::uint32_t ActivePointLightCount = 0;
-    DirectX::XMFLOAT3 Padding = { 0.0f, 0.0f, 0.0f };
+    float EnableIbl = 1.0f;
+    float IblMaxReflectionLod = 4.0f;
+    float Padding = 0.0f;
 };

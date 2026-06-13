@@ -47,6 +47,20 @@ struct TreeInstanceGpu
 constexpr float kForestPatchHalfExtent = 24.0f;
 constexpr float kForestPatchCenterX = 0.0f;
 constexpr float kForestPatchCenterZ = -63.0f;
+static constexpr float kParticlesDisableCameraRadius = 34.0f;
+static constexpr float kShadowDisableCameraRadius = 46.0f;
+static constexpr UINT kPbrPointLightIndex = 0u;
+
+int NextSceneTextureSrvIndex(const std::map<std::string, int>& cache, int forestInstanceSrvBase, int reservedHeapEnd)
+{
+    int index = 2;
+    for (const auto& kv : cache)
+        index = (std::max)(index, kv.second + 1);
+
+    if (index >= forestInstanceSrvBase && index < reservedHeapEnd)
+        index = reservedHeapEnd;
+    return index;
+}
 
 bool FileExistsA_Local(const char* p)
 {
@@ -104,6 +118,283 @@ std::string ResolveMediaPath(const std::string& path)
             return t;
     }
     return path;
+}
+
+bool TryLoadDdsTexture(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* cmdList,
+    const char* logicalPath,
+    const std::string& texName,
+    std::unordered_map<std::string, std::unique_ptr<Texture>>& textures)
+{
+    const std::string resolved = ResolveMediaPath(logicalPath);
+    std::wstring wpath(resolved.begin(), resolved.end());
+
+    auto tex = std::make_unique<Texture>();
+    tex->Name = texName;
+    tex->Filename = wpath;
+    const HRESULT hr = DirectX::CreateDDSTextureFromFile12(
+        device, cmdList, wpath.c_str(), tex->Resource, tex->UploadHeap);
+    if (FAILED(hr))
+        return false;
+
+    textures[texName] = std::move(tex);
+    return true;
+}
+
+static XMFLOAT3 IblCubeDirection(UINT face, float u, float v)
+{
+    const float uc = 2.0f * u - 1.0f;
+    const float vc = 2.0f * v - 1.0f;
+    switch (face)
+    {
+    case 0: return { 1.0f, -vc, -uc };
+    case 1: return { -1.0f, -vc, uc };
+    case 2: return { uc, 1.0f, vc };
+    case 3: return { uc, -1.0f, -vc };
+    case 4: return { uc, -vc, 1.0f };
+    default: return { -uc, -vc, -1.0f };
+    }
+}
+
+static XMFLOAT3 ProceduralSkyColor(const XMFLOAT3& dir)
+{
+    if (dir.y < -0.05f)
+        return { 0.03f, 0.04f, 0.06f };
+
+    const float t = powf(MathHelper::Clamp(dir.y, 0.0f, 1.0f), 0.35f);
+    const XMFLOAT3 horizon = { 0.95f, 0.50f, 0.18f };
+    const XMFLOAT3 zenith = { 0.10f, 0.35f, 0.95f };
+    return {
+        horizon.x + (zenith.x - horizon.x) * t,
+        horizon.y + (zenith.y - horizon.y) * t,
+        horizon.z + (zenith.z - horizon.z) * t
+    };
+}
+
+static void FillCubeFaceSky(
+    UINT face,
+    UINT size,
+    std::vector<uint8_t>& rgba)
+{
+    rgba.resize((size_t)size * size * 4);
+    for (UINT y = 0; y < size; ++y)
+    {
+        for (UINT x = 0; x < size; ++x)
+        {
+            const float u = (x + 0.5f) / size;
+            const float v = (y + 0.5f) / size;
+            XMFLOAT3 dir = IblCubeDirection(face, u, v);
+            XMVECTOR n = XMVector3Normalize(XMLoadFloat3(&dir));
+            XMStoreFloat3(&dir, n);
+            const XMFLOAT3 c = ProceduralSkyColor(dir);
+            const size_t i = ((size_t)y * size + x) * 4;
+            rgba[i + 0] = (uint8_t)(MathHelper::Clamp(c.x, 0.0f, 1.0f) * 255.0f);
+            rgba[i + 1] = (uint8_t)(MathHelper::Clamp(c.y, 0.0f, 1.0f) * 255.0f);
+            rgba[i + 2] = (uint8_t)(MathHelper::Clamp(c.z, 0.0f, 1.0f) * 255.0f);
+            rgba[i + 3] = 255;
+        }
+    }
+}
+
+static void DownsampleCubeFaces(
+    const std::vector<std::vector<uint8_t>>& srcFaces,
+    UINT srcSize,
+    std::vector<std::vector<uint8_t>>& dstFaces,
+    UINT dstSize)
+{
+    dstFaces.resize(6);
+    for (UINT face = 0; face < 6; ++face)
+    {
+        dstFaces[face].resize((size_t)dstSize * dstSize * 4);
+        for (UINT y = 0; y < dstSize; ++y)
+        {
+            for (UINT x = 0; x < dstSize; ++x)
+            {
+                float r = 0, g = 0, b = 0;
+                for (UINT oy = 0; oy < 2; ++oy)
+                {
+                    for (UINT ox = 0; ox < 2; ++ox)
+                    {
+                        const UINT sx = x * 2 + ox;
+                        const UINT sy = y * 2 + oy;
+                        const size_t si = ((size_t)sy * srcSize + sx) * 4;
+                        r += srcFaces[face][si + 0];
+                        g += srcFaces[face][si + 1];
+                        b += srcFaces[face][si + 2];
+                    }
+                }
+                const size_t di = ((size_t)y * dstSize + x) * 4;
+                dstFaces[face][di + 0] = (uint8_t)(r * 0.25f);
+                dstFaces[face][di + 1] = (uint8_t)(g * 0.25f);
+                dstFaces[face][di + 2] = (uint8_t)(b * 0.25f);
+                dstFaces[face][di + 3] = 255;
+            }
+        }
+    }
+}
+
+static XMFLOAT2 EnvBrdfApprox(float roughness, float nDotV)
+{
+    const float c0x = -1.0f, c0y = -0.0275f, c0z = -0.572f, c0w = 0.022f;
+    const float c1x = 1.0f, c1y = 0.0425f, c1z = 1.04f, c1w = -0.04f;
+    const float rx = roughness * c0x + c1x;
+    const float ry = roughness * c0y + c1y;
+    const float rz = roughness * c0z + c1z;
+    const float rw = roughness * c0w + c1w;
+    const float a004 = (std::min)(rx * rx, exp2f(-9.28f * nDotV)) * rx + ry;
+    return { (-1.04f) * a004 + rz, 1.04f * a004 + rw };
+}
+
+static bool UploadTexture2D(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* cmdList,
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
+    const void* pixelData,
+    UINT pixelStride,
+    ComPtr<ID3D12Resource>& outTex,
+    ComPtr<ID3D12Resource>& outUpload)
+{
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = format;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    const CD3DX12_HEAP_PROPERTIES defaultProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(device->CreateCommittedResource(
+        &defaultProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&outTex))))
+        return false;
+
+    const UINT64 uploadSize = GetRequiredIntermediateSize(outTex.Get(), 0, 1);
+    const CD3DX12_HEAP_PROPERTIES uploadProps(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
+    if (FAILED(device->CreateCommittedResource(
+        &uploadProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&outUpload))))
+        return false;
+
+    D3D12_SUBRESOURCE_DATA sub = {};
+    sub.pData = pixelData;
+    sub.RowPitch = width * pixelStride;
+    sub.SlicePitch = sub.RowPitch * height;
+    UpdateSubresources(cmdList, outTex.Get(), outUpload.Get(), 0, 0, 1, &sub);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        outTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &barrier);
+    return true;
+}
+
+static bool UploadTextureCubeMipChain(
+    ID3D12Device* device,
+    ID3D12GraphicsCommandList* cmdList,
+    UINT baseSize,
+    UINT mipLevels,
+    const std::vector<std::vector<std::vector<uint8_t>>>& mipsFaces,
+    ComPtr<ID3D12Resource>& outTex,
+    ComPtr<ID3D12Resource>& outUpload)
+{
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = baseSize;
+    texDesc.Height = baseSize;
+    texDesc.DepthOrArraySize = 6;
+    texDesc.MipLevels = mipLevels;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    const CD3DX12_HEAP_PROPERTIES defaultProps(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(device->CreateCommittedResource(
+        &defaultProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&outTex))))
+        return false;
+
+    const UINT64 uploadSize = GetRequiredIntermediateSize(outTex.Get(), 0, mipLevels * 6);
+    const CD3DX12_HEAP_PROPERTIES uploadProps(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
+    if (FAILED(device->CreateCommittedResource(
+        &uploadProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&outUpload))))
+        return false;
+
+    std::vector<D3D12_SUBRESOURCE_DATA> subs;
+    subs.resize(mipLevels * 6);
+    for (UINT mip = 0; mip < mipLevels; ++mip)
+    {
+        const UINT size = (std::max)(1u, baseSize >> mip);
+        for (UINT face = 0; face < 6; ++face)
+        {
+            const UINT idx = mip * 6 + face;
+            subs[idx].pData = mipsFaces[mip][face].data();
+            subs[idx].RowPitch = size * 4;
+            subs[idx].SlicePitch = subs[idx].RowPitch * size;
+        }
+    }
+
+    UpdateSubresources(cmdList, outTex.Get(), outUpload.Get(), 0, 0, (UINT)subs.size(), subs.data());
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        outTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmdList->ResourceBarrier(1, &barrier);
+    return true;
+}
+
+static std::string MakeAbsoluteTexturePath(const std::string& baseDir, const std::string& relPath)
+{
+    if (relPath.empty())
+        return {};
+    if (relPath[0] == '/' || relPath[0] == '\\' || relPath.find(':') != std::string::npos)
+        return ResolveMediaPath(relPath);
+
+    std::string path = baseDir;
+    if (!path.empty() && path.back() != '/' && path.back() != '\\')
+        path += '/';
+    path += relPath;
+    std::replace(path.begin(), path.end(), '\\', '/');
+    return ResolveMediaPath(path);
+}
+
+static bool TryGetAssimpTexture(
+    aiMaterial* material,
+    aiTextureType type,
+    const std::string& baseDir,
+    std::string& outPath)
+{
+    aiString texPath;
+    if (material->GetTexture(type, 0, &texPath) != AI_SUCCESS)
+        return false;
+
+    outPath = MakeAbsoluteTexturePath(baseDir, texPath.C_Str());
+    return !outPath.empty();
+}
+
+static bool TryResolvePbrFallbackPath(const std::string& baseDir, const char* filename, std::string& outPath)
+{
+    if (!filename || !filename[0])
+        return false;
+
+    const std::string candidates[] = {
+        baseDir + filename,
+        baseDir + "Textures/" + filename,
+        baseDir + "textures/" + filename
+    };
+
+    for (const auto& candidate : candidates)
+    {
+        if (FileExistsA_Local(ResolveMediaPath(candidate).c_str()))
+        {
+            outPath = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 }
 
@@ -168,11 +459,32 @@ private:
     void UpdateDeferredLightCB();
 
     void LoadTextures();
+    void LoadIblTextures();
+    void CreateProceduralIblTextures();
     void LoadBillboardTreeTexture();
+    void CreateFallbackTreeCardTexture();
+    bool TryLoadBillboardTreeCard(const std::string& resolvedPath, int heapIndex);
     void BuildRootSignature();
     void BuildDescriptorHeaps();
     void BuildShadersAndInputLayout();
     void LoadOBJModels();
+    void LoadPbrModel();
+    bool ImportPbrFbxModel(
+        const char* const* tryPaths,
+        size_t tryPathCount,
+        const char* geometryName,
+        const char* fallbackAlbedo,
+        const char* fallbackNormal,
+        const char* fallbackMetal,
+        const char* fallbackRough);
+    void AddPbrModelRenderItems(
+        const char* geometryName,
+        float worldX,
+        float worldZ,
+        float rotationY,
+        float targetHeight,
+        int& objIndex,
+        XMFLOAT3* outCenter = nullptr);
     void LoadSlendermanModel();
     void LoadTreeLodMesh();
     void BuildPSOs();
@@ -188,14 +500,16 @@ private:
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
     void CreateBillboardForest();
-    void UpdateForestLod();
+    void UpdateForestLod(UINT frameIndex);
     void DrawBillboardForest(ID3D12GraphicsCommandList* cmdList);
     void BuildStressTestObjects(int& objIndex);
     void UpdateStressVisibility();
+    void SetupPbrPointLight();
+    void WaitForGpu();
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
-    void LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex);
+    bool LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex);
 
 private:
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
@@ -247,8 +561,18 @@ private:
     std::map<std::string, int> mTextureCache;
     std::map<std::string, int> mMaterialToHeapIndex;
     std::map<std::string, int> mMaterialToBumpHeapIndex;
+    std::map<std::string, int> mMaterialToMetallicHeapIndex;
+    std::map<std::string, int> mMaterialToRoughnessHeapIndex;
     std::map<std::string, XMFLOAT4> mSlendermanMaterialAlbedo;
 
+    bool mHasPbrModel = false;
+    bool mHasPbrCerberus = false;
+    bool mHasPbrWoodRoot = false;
+    XMFLOAT3 mPbrWorldCenter = { 0.0f, 0.0f, 0.0f };
+    bool mIblTexturesLoaded = false;
+    bool mEnableIbl = true;
+    float mIblMaxReflectionLod = 4.0f;
+    bool mF8KeyDown = false;
     bool mHasSlenderman = false;
     XMFLOAT3 mSlendermanWorldCenter = { 0.0f, 0.0f, 0.0f };
     static constexpr float kSlendermanVcrNearDist = 10.0f;
@@ -259,12 +583,14 @@ private:
     PassConstants mMainPassCB;
 
     XMFLOAT3 mEyePos = { 0.0f, 0.0f, 0.0f };
+    XMFLOAT3 mCameraTarget = { 0.0f, 0.0f, 0.0f };
     XMFLOAT4X4 mView = MathHelper::Identity4x4();
     XMFLOAT4X4 mProj = MathHelper::Identity4x4();
 
     float mTheta = 1.3f * XM_PI;
     float mPhi = 0.4f * XM_PI;
     float mRadius = 8.0f;
+    float mCameraMoveSpeed = 14.0f;
 
     POINT mLastMousePos;
 
@@ -278,6 +604,7 @@ private:
     UINT mActivePointLights = 0;
 
     bool mGeometryWireframe = false;
+    std::array<D3D12_RESOURCE_STATES, SwapChainBufferCount> mBackBufferStates = {};
     bool mF3KeyDown = false;
     bool mEdgePostEnabled = true;
     bool mVcrPostEnabled = true;
@@ -285,25 +612,29 @@ private:
     bool mF7KeyDown = false;
 
     std::vector<TreeInstanceGpu> mForestInstancesCpu;
-    ComPtr<ID3D12Resource> mForestMeshUpload;
-    ComPtr<ID3D12Resource> mForestBillboardUpload;
-    BYTE* mForestMeshMapped = nullptr;
-    BYTE* mForestBillboardMapped = nullptr;
-    UINT mForestMeshCount = 0;
-    UINT mForestBillboardCount = 0;
+    ComPtr<ID3D12Resource> mForestMeshUpload[gNumFrameResources];
+    ComPtr<ID3D12Resource> mForestBillboardUpload[gNumFrameResources];
+    BYTE* mForestMeshMapped[gNumFrameResources] = {};
+    BYTE* mForestBillboardMapped[gNumFrameResources] = {};
+    UINT mForestMeshCount[gNumFrameResources] = {};
+    UINT mForestBillboardCount[gNumFrameResources] = {};
+    std::vector<uint8_t> mForestLodUsesMesh;
     bool mTreeLodMeshLoaded = false;
     UINT mGpuFrameIndex = 0;
     UINT mTreeMtlDiffuseSrvHeapIndex = 0;
+    UINT mFallbackTreeSrvHeapIndex = 0;
     UINT mBillboardForestInstanceCount = 0;
     UINT mBillboardObjectCbIndex = 0;
     UINT mBillboardTreeSrvHeapIndex = 0;
     static constexpr UINT kMaxForestInstances = 512;
-    static constexpr size_t kMaxStressDrawsPerFrame = 200u;
     static constexpr UINT kMaxPointLightsForShading = 256u;
-    static constexpr float kForestLodMeshDistance = 26.0f;
-    static constexpr UINT kTreeInstanceMeshSrvHeapIndex = 240;
-    static constexpr UINT kTreeInstanceBillboardSrvHeapIndex = 241;
-    static constexpr UINT kParticleSrvHeapStartIndex = 244;
+    static constexpr float kForestLodMeshNear = 20.0f;
+    static constexpr float kForestLodMeshFar = 34.0f;
+    static constexpr UINT kForestInstanceSrvBaseIndex = 240;
+    static constexpr UINT kForestInstanceSrvCount = 6;
+    static constexpr UINT kParticleSrvHeapStartIndex = kForestInstanceSrvBaseIndex + kForestInstanceSrvCount;
+    static constexpr UINT kParticleSrvDescriptorCount = 10;
+    static constexpr UINT kReservedSrvHeapEnd = kParticleSrvHeapStartIndex + kParticleSrvDescriptorCount;
     static constexpr UINT kShadowSrvHeapStartIndex = 500;
     static constexpr UINT kSrvDescriptorHeapSize = 512;
 };
@@ -349,7 +680,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
     mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
-    mDirectionalLights[0].Strength = { 0.20f, 0.35f, 1.40f };
+    mDirectionalLights[0].Strength = { 0.55f, 0.75f, 2.2f };
 
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
     {
@@ -370,7 +701,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     mSpotLights[1].Position = { 0.0f, 0.0f, 0.0f };
     mSpotLights[1].Direction = { 0.0f, -0.4f, 1.0f };
-    mSpotLights[1].Strength = { 1.0f, 0.0f, 0.0f };
+    mSpotLights[1].Strength = { 2.8f, 2.6f, 2.4f };
     mSpotLights[1].FalloffStart = 1.5f;
     mSpotLights[1].FalloffEnd = 70.0f;
     mSpotLights[1].SpotPower = 96.0f;
@@ -387,13 +718,15 @@ std::wstring CrateApp::GetFrameStatsExtra() const
     wchar_t buf[320];
     swprintf_s(
         buf,
-        L"   stress draw: %zu / %zu   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s",
+        L"   stress draw: %zu / %zu   pbr wood:%s   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s F8 ibl:%s",
         mStressVisibleRitems.size(),
         mStressRitems.size(),
+        mHasPbrWoodRoot ? L"on" : L"off",
         mFrustumCullEnabled ? L"on" : L"off",
         mKdTreeCullingEnabled ? L"on" : L"off",
         mEdgePostEnabled ? L"on" : L"off",
-        mVcrPostEnabled ? L"on" : L"off");
+        mVcrPostEnabled ? L"on" : L"off",
+        mIblTexturesLoaded ? (mEnableIbl ? L"on" : L"off") : L"missing");
     return buf;
 }
 
@@ -407,8 +740,10 @@ bool CrateApp::Initialize()
     mCbvSrvDescriptorSize = md3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     LoadTextures();
+    LoadIblTextures();
     BuildDescriptorHeaps();
     LoadOBJModels();
+    LoadPbrModel();
     LoadSlendermanModel();
     LoadTreeLodMesh();
     LoadBillboardTreeTexture();
@@ -439,6 +774,13 @@ bool CrateApp::Initialize()
         mShadowSystem->GetShadowMapResource(),
         ShadowSystem::kCascadeCount,
         mTextures["checkerTex"]->Resource.Get());
+    if (mIblTexturesLoaded)
+    {
+        mRenderingSystem->SetIblResources(
+            mTextures["irradianceMap"]->Resource.Get(),
+            mTextures["prefilterEnvMap"]->Resource.Get(),
+            mTextures["integrationMap"]->Resource.Get());
+    }
 
     mParticleSystem = std::make_unique<ParticleSystem>();
     mParticleSystem->Initialize(
@@ -461,6 +803,8 @@ void CrateApp::OnResize()
 {
     D3DApp::OnResize();
 
+    mBackBufferStates.fill(D3D12_RESOURCE_STATE_COMMON);
+
     if (mRenderingSystem)
     {
         mRenderingSystem->OnResize(mClientWidth, mClientHeight);
@@ -473,7 +817,6 @@ void CrateApp::OnResize()
 void CrateApp::Update(const GameTimer& gt)
 {
     UpdateCamera(gt);
-    UpdateForestLod();
 
     mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % gNumFrameResources;
     mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
@@ -523,6 +866,23 @@ void CrateApp::Update(const GameTimer& gt)
     else
     {
         mF7KeyDown = false;
+    }
+
+    const SHORT f8State = GetAsyncKeyState(VK_F8);
+    if ((f8State & 0x8000) != 0)
+    {
+        if (!mF8KeyDown)
+        {
+            mEnableIbl = !mEnableIbl;
+            mF8KeyDown = true;
+            char buf[96];
+            sprintf_s(buf, "IBL ambient: %s\n", mEnableIbl ? "ON" : "OFF");
+            OutputDebugStringA(buf);
+        }
+    }
+    else
+    {
+        mF8KeyDown = false;
     }
 
     UpdatePostProcessCB();
@@ -576,7 +936,7 @@ void CrateApp::Update(const GameTimer& gt)
         mF5KeyDown = false;
     }
 
-    if (!mFallingActive[0])
+    if (!mFallingActive[0] && !mHasPbrModel)
     {
         mFallingActive[0] = true;
         mFallingVelY[0] = 0.0f;
@@ -585,26 +945,32 @@ void CrateApp::Update(const GameTimer& gt)
 
     mSpawnAccumulator += gt.DeltaTime();
     const float spawnInterval = 1.0f;
-    while (mSpawnAccumulator >= spawnInterval)
+    if (mRadius <= 40.0f)
     {
-        mSpawnAccumulator -= spawnInterval;
-        UINT activeCount = 0;
-        for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+        while (mSpawnAccumulator >= spawnInterval)
         {
-            if (mFallingActive[i])
-                ++activeCount;
-        }
-        if (activeCount >= kMaxPointLightsForShading)
-            break;
-
-        for (UINT i = 0; i < kDeferredPointLightCount; ++i)
-        {
-            if (!mFallingActive[i])
+            mSpawnAccumulator -= spawnInterval;
+            UINT activeCount = 0;
+            for (UINT i = 0; i < kDeferredPointLightCount; ++i)
             {
-                mFallingActive[i] = true;
-                mFallingVelY[i] = 0.0f;
-                mPointLights[i].Position = { 0.0f, 12.0f, 0.0f };
+                if (mFallingActive[i])
+                    ++activeCount;
+            }
+            if (activeCount >= kMaxPointLightsForShading)
                 break;
+
+            for (UINT i = 0; i < kDeferredPointLightCount; ++i)
+            {
+                if (mHasPbrModel && i == kPbrPointLightIndex)
+                    continue;
+
+                if (!mFallingActive[i])
+                {
+                    mFallingActive[i] = true;
+                    mFallingVelY[i] = 0.0f;
+                    mPointLights[i].Position = { 0.0f, 12.0f, 0.0f };
+                    break;
+                }
             }
         }
     }
@@ -616,23 +982,45 @@ void CrateApp::Update(const GameTimer& gt)
         if (!mFallingActive[i])
             continue;
 
-        auto& L = mPointLights[i];
-        if (L.Position.y <= floorY + 1e-3f)
+        if (mHasPbrModel && i == kPbrPointLightIndex)
             continue;
 
-        mFallingVelY[i] = -fallSpeed;
-        L.Position.y += mFallingVelY[i] * gt.DeltaTime();
-        if (L.Position.y <= floorY)
+        auto& L = mPointLights[i];
+        if (L.Position.y <= floorY + 1e-3f)
         {
-            L.Position.y = floorY;
-            mFallingVelY[i] = 0.0f;
+            mFallingActive[i] = false;
+            continue;
         }
+
+        mFallingVelY[i] += fallSpeed * gt.DeltaTime();
+        L.Position.y -= mFallingVelY[i] * gt.DeltaTime();
     }
     UpdateDeferredLightCB();
 }
 
+void CrateApp::WaitForGpu()
+{
+    if (mFence->GetCompletedValue() < mCurrentFence)
+    {
+        HANDLE eventHandle = CreateEventEx(nullptr, nullptr, false, EVENT_ALL_ACCESS);
+        ThrowIfFailed(mFence->SetEventOnCompletion(mCurrentFence, eventHandle));
+        WaitForSingleObject(eventHandle, INFINITE);
+        CloseHandle(eventHandle);
+    }
+}
+
 void CrateApp::Draw(const GameTimer& gt)
 {
+    if (mShadowSystem)
+        mShadowSystem->MarkShadowMapShaderResource();
+
+    UpdateForestLod(mCurrFrameResourceIndex);
+    mRenderingSystem->UpdateLightBufferSrv(
+        mCurrFrameResourceIndex,
+        mCurrFrameResource->DeferredLightBuffer->Resource(),
+        kDeferredTotalLightCount,
+        sizeof(DeferredLightGpu));
+
     auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
 
     ThrowIfFailed(cmdListAlloc->Reset());
@@ -664,15 +1052,18 @@ void CrateApp::Draw(const GameTimer& gt)
         mShadowSystem->UpdateCascades(
             view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
 
-        mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
-        for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
+        if (mRadius <= kShadowDisableCameraRadius)
         {
-            mShadowSystem->BeginCascade(mCommandList.Get(), c);
-            DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
+            mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
+            for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
+            {
+                mShadowSystem->BeginCascade(mCommandList.Get(), c, mCurrFrameResourceIndex);
+                DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
+            }
+            mShadowSystem->EndPass(mCommandList.Get());
         }
-        mShadowSystem->EndPass(mCommandList.Get());
 
-        mShadowSystem->UpdateLightingConstants(lightDir);
+        mShadowSystem->UpdateLightingConstants(lightDir, mCurrFrameResourceIndex);
         mCommandList->RSSetViewports(1, &mScreenViewport);
         mCommandList->RSSetScissorRects(1, &mScissorRect);
     }
@@ -689,11 +1080,10 @@ void CrateApp::Draw(const GameTimer& gt)
         mGeometryWireframe);
 
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
-    if (!mStressVisibleRitems.empty())
-        DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
+    DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
     DrawBillboardForest(mCommandList.Get());
 
-    if (mParticleSystem)
+    if (mParticleSystem && mRadius <= kParticlesDisableCameraRadius)
     {
         mParticleSystem->SetEmitterPosition(XMFLOAT3(0.0f, 1.2f, 0.0f));
         mParticleSystem->Update(mCommandList.Get(), gt.DeltaTime(), gt.TotalTime());
@@ -705,9 +1095,11 @@ void CrateApp::Draw(const GameTimer& gt)
     if (mShadowSystem)
         mShadowSystem->PrepareForLighting(mCommandList.Get());
 
-    auto transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_RESOURCE_STATES& backBufferState = mBackBufferStates[mCurrBackBuffer];
+    auto transition = CD3DX12_RESOURCE_BARRIER::Transition(
+        CurrentBackBuffer(), backBufferState, D3D12_RESOURCE_STATE_RENDER_TARGET);
     mCommandList->ResourceBarrier(1, &transition);
+    backBufferState = D3D12_RESOURCE_STATE_RENDER_TARGET;
     mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::Black, 0, nullptr);
 
     mRenderingSystem->ExecuteLightingPass(
@@ -715,10 +1107,8 @@ void CrateApp::Draw(const GameTimer& gt)
         CurrentBackBufferView(),
         passAddress,
         mCurrFrameResource->DeferredLightParamsCB->Resource()->GetGPUVirtualAddress(),
-        mShadowSystem ? mShadowSystem->GetLightingConstantBufferAddress() : 0,
-        mCurrFrameResource->DeferredLightBuffer->Resource(),
-        kDeferredTotalLightCount,
-        sizeof(DeferredLightGpu));
+        mShadowSystem ? mShadowSystem->GetLightingConstantBufferAddress(mCurrFrameResourceIndex) : 0,
+        mCurrFrameResourceIndex);
 
     if (!mWaterRitems.empty())
     {
@@ -743,12 +1133,14 @@ void CrateApp::Draw(const GameTimer& gt)
             passAddress,
             mCurrFrameResource->PostProcessCB->Resource()->GetGPUVirtualAddress(),
             mEdgePostEnabled,
-            mVcrPostEnabled);
+            mVcrPostEnabled,
+            backBufferState);
     }
 
-    transition = CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+    transition = CD3DX12_RESOURCE_BARRIER::Transition(
+        CurrentBackBuffer(), backBufferState, D3D12_RESOURCE_STATE_PRESENT);
     mCommandList->ResourceBarrier(1, &transition);
+    backBufferState = D3D12_RESOURCE_STATE_PRESENT;
 
     ThrowIfFailed(mCommandList->Close());
 
@@ -869,28 +1261,31 @@ void CrateApp::CreateBillboardForest()
     }
 
     mBillboardForestInstanceCount = (UINT)mForestInstancesCpu.size();
+    mForestLodUsesMesh.assign(mForestInstancesCpu.size(), 0);
     const UINT instBufBytes = kMaxForestInstances * (UINT)sizeof(TreeInstanceGpu);
 
     auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
     auto bufDesc = CD3DX12_RESOURCE_DESC::Buffer(instBufBytes);
 
+    for (int fi = 0; fi < gNumFrameResources; ++fi)
+    {
     ThrowIfFailed(md3dDevice->CreateCommittedResource(
         &uploadHeap,
         D3D12_HEAP_FLAG_NONE,
         &bufDesc,
         D3D12_RESOURCE_STATE_GENERIC_READ,
         nullptr,
-        IID_PPV_ARGS(&mForestMeshUpload)));
+        IID_PPV_ARGS(&mForestMeshUpload[fi])));
     ThrowIfFailed(md3dDevice->CreateCommittedResource(
         &uploadHeap,
         D3D12_HEAP_FLAG_NONE,
         &bufDesc,
         D3D12_RESOURCE_STATE_GENERIC_READ,
         nullptr,
-        IID_PPV_ARGS(&mForestBillboardUpload)));
+        IID_PPV_ARGS(&mForestBillboardUpload[fi])));
 
-    ThrowIfFailed(mForestMeshUpload->Map(0, nullptr, reinterpret_cast<void**>(&mForestMeshMapped)));
-    ThrowIfFailed(mForestBillboardUpload->Map(0, nullptr, reinterpret_cast<void**>(&mForestBillboardMapped)));
+    ThrowIfFailed(mForestMeshUpload[fi]->Map(0, nullptr, reinterpret_cast<void**>(&mForestMeshMapped[fi])));
+    ThrowIfFailed(mForestBillboardUpload[fi]->Map(0, nullptr, reinterpret_cast<void**>(&mForestBillboardMapped[fi])));
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -901,13 +1296,17 @@ void CrateApp::CreateBillboardForest()
     srvDesc.Buffer.StructureByteStride = sizeof(TreeInstanceGpu);
     srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
+    const UINT meshSrvIndex = kForestInstanceSrvBaseIndex + fi * 2u;
+    const UINT billSrvIndex = meshSrvIndex + 1u;
+
     CD3DX12_CPU_DESCRIPTOR_HANDLE hMesh(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-    hMesh.Offset(kTreeInstanceMeshSrvHeapIndex, mCbvSrvDescriptorSize);
-    md3dDevice->CreateShaderResourceView(mForestMeshUpload.Get(), &srvDesc, hMesh);
+    hMesh.Offset(meshSrvIndex, mCbvSrvDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mForestMeshUpload[fi].Get(), &srvDesc, hMesh);
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE hBill(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-    hBill.Offset(kTreeInstanceBillboardSrvHeapIndex, mCbvSrvDescriptorSize);
-    md3dDevice->CreateShaderResourceView(mForestBillboardUpload.Get(), &srvDesc, hBill);
+    hBill.Offset(billSrvIndex, mCbvSrvDescriptorSize);
+    md3dDevice->CreateShaderResourceView(mForestBillboardUpload[fi].Get(), &srvDesc, hBill);
+    }
 
     OutputDebugStringA("Billboard forest geometry + instances created\n");
 }
@@ -960,7 +1359,7 @@ void CrateApp::CreateWaterPlaneGeometry()
     OutputDebugStringA("Water plane geometry created\n");
 }
 
-void CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex)
+bool CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex)
 {
     const std::string resolvedPath = ResolveMediaPath(texturePath);
 
@@ -973,10 +1372,6 @@ void CrateApp::LoadModelTexture(const std::string& texturePath, const std::strin
     OutputDebugStringA(msg);
 
     std::wstring wTexturePath(resolvedPath.begin(), resolvedPath.end());
-
-    auto modelTex = std::make_unique<Texture>();
-    modelTex->Name = texName;
-    modelTex->Filename = wTexturePath;
 
     ComPtr<ID3D12Resource> res;
     ComPtr<ID3D12Resource> upload;
@@ -1061,9 +1456,6 @@ void CrateApp::LoadModelTexture(const std::string& texturePath, const std::strin
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 mCommandList->ResourceBarrier(1, &barrier);
 
-                modelTex->Resource = res;
-                modelTex->UploadHeap = upload;
-
                 CD3DX12_CPU_DESCRIPTOR_HANDLE hDescriptor(
                     mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
                 hDescriptor.Offset(heapIndex, mCbvSrvDescriptorSize);
@@ -1078,30 +1470,216 @@ void CrateApp::LoadModelTexture(const std::string& texturePath, const std::strin
 
                 md3dDevice->CreateShaderResourceView(res.Get(), &srvDesc, hDescriptor);
 
+                auto modelTex = std::make_unique<Texture>();
+                modelTex->Name = texName;
+                modelTex->Filename = wTexturePath;
+                modelTex->Resource = res;
+                modelTex->UploadHeap = upload;
+                mTextures[texName] = std::move(modelTex);
+
                 sprintf_s(msg, "Texture loaded successfully: %s\n", resolvedPath.c_str());
                 OutputDebugStringA(msg);
+                return true;
             }
         }
     }
 
-    if (FAILED(hr))
+    sprintf_s(msg, "Failed to load texture: %s\n", texturePath.c_str());
+    OutputDebugStringA(msg);
+    return false;
+}
+
+static bool DXGIFormatHasAlpha(DXGI_FORMAT fmt)
+{
+    switch (fmt)
     {
-        sprintf_s(msg, "Failed to load texture: %s\n", texturePath.c_str());
-        OutputDebugStringA(msg);
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_BC3_UNORM:
+    case DXGI_FORMAT_BC3_UNORM_SRGB:
+    case DXGI_FORMAT_BC7_UNORM:
+    case DXGI_FORMAT_BC7_UNORM_SRGB:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool CrateApp::TryLoadBillboardTreeCard(const std::string& resolvedPath, int heapIndex)
+{
+    if (!FileExistsA_Local(resolvedPath.c_str()))
+        return false;
+
+    std::wstring wPath(resolvedPath.begin(), resolvedPath.end());
+    ScratchImage image;
+    TexMetadata metadata;
+    HRESULT hr = LoadFromDDSFile(wPath.c_str(), DDS_FLAGS_NONE, &metadata, image);
+    if (FAILED(hr))
+        hr = LoadFromTGAFile(wPath.c_str(), &metadata, image);
+    if (FAILED(hr))
+        hr = LoadFromWICFile(wPath.c_str(), WIC_FLAGS_FORCE_SRGB, &metadata, image);
+    if (FAILED(hr))
+        hr = LoadFromWICFile(wPath.c_str(), WIC_FLAGS_NONE, &metadata, image);
+
+    if (FAILED(hr))
+        return false;
+
+    if (metadata.width < 16 || metadata.height < 16)
+    {
+        OutputDebugStringA("Billboard: rejected tree sprite (too small)\n");
+        return false;
+    }
+    if (!DXGIFormatHasAlpha(metadata.format))
+    {
+        OutputDebugStringA("Billboard: rejected tree sprite (no alpha channel)\n");
+        return false;
     }
 
-    mTextures[modelTex->Name] = std::move(modelTex);
+    mTextures.erase("treeTex");
+    if (!LoadModelTexture(resolvedPath, "treeTex", heapIndex))
+        return false;
+
+    auto it = mTextures.find("treeTex");
+    return it != mTextures.end() && it->second && it->second->Resource;
+}
+
+void CrateApp::CreateFallbackTreeCardTexture()
+{
+    if (mFallbackTreeSrvHeapIndex != 0)
+        return;
+
+    constexpr UINT tw = 128;
+    constexpr UINT th = 256;
+    std::vector<uint8_t> bgra((size_t)tw * th * 4);
+
+    for (UINT y = 0; y < th; ++y)
+    {
+        const float v = (y + 0.5f) / th;
+        for (UINT x = 0; x < tw; ++x)
+        {
+            const float u = (x + 0.5f) / tw;
+            uint8_t r = 0, g = 0, b = 0, a = 0;
+
+            if (v < 0.30f)
+            {
+                const float du = fabsf(u - 0.5f);
+                if (du < 0.09f)
+                {
+                    a = 255;
+                    r = 89;
+                    g = 56;
+                    b = 31;
+                }
+            }
+            else
+            {
+                const float du = (u - 0.5f) / 0.44f;
+                const float dv = (v - 0.58f) / 0.40f;
+                const float d2 = du * du + dv * dv;
+                if (d2 < 1.0f)
+                {
+                    const float edge = (std::max)(0.0f, (std::min)(1.0f, (1.0f - d2) / 0.18f));
+                    a = (uint8_t)(255.0f * edge);
+                    r = 32;
+                    g = (uint8_t)(140 + 40 * (1.0f - d2));
+                    b = 38;
+                }
+            }
+
+            const size_t i = ((size_t)y * tw + x) * 4;
+            bgra[i + 0] = b;
+            bgra[i + 1] = g;
+            bgra[i + 2] = r;
+            bgra[i + 3] = a;
+        }
+    }
+
+    int nextHeap = NextSceneTextureSrvIndex(mTextureCache, (int)kForestInstanceSrvBaseIndex, (int)kReservedSrvHeapEnd);
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = tw;
+    texDesc.Height = th;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ComPtr<ID3D12Resource> defaultHeap;
+    const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &defaultHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&defaultHeap)));
+
+    const UINT64 uploadSize = GetRequiredIntermediateSize(defaultHeap.Get(), 0, 1);
+    ComPtr<ID3D12Resource> upload;
+    const CD3DX12_HEAP_PROPERTIES uploadHeapProps(D3D12_HEAP_TYPE_UPLOAD);
+    const CD3DX12_RESOURCE_DESC uploadBufDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
+    ThrowIfFailed(md3dDevice->CreateCommittedResource(
+        &uploadHeapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadBufDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&upload)));
+
+    D3D12_SUBRESOURCE_DATA subresource = {};
+    subresource.pData = bgra.data();
+    subresource.RowPitch = tw * 4;
+    subresource.SlicePitch = tw * th * 4;
+
+    UpdateSubresources(mCommandList.Get(), defaultHeap.Get(), upload.Get(), 0, 0, 1, &subresource);
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        defaultHeap.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mCommandList->ResourceBarrier(1, &barrier);
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+    h.Offset(nextHeap, mCbvSrvDescriptorSize);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    md3dDevice->CreateShaderResourceView(defaultHeap.Get(), &srvDesc, h);
+
+    auto tex = std::make_unique<Texture>();
+    tex->Name = "fallbackTreeCard";
+    tex->Resource = defaultHeap;
+    tex->UploadHeap = upload;
+    mTextures["fallbackTreeCard"] = std::move(tex);
+
+    mFallbackTreeSrvHeapIndex = static_cast<UINT>(nextHeap);
+    mTextureCache["__fallback_tree_card__"] = nextHeap;
+    char msg[128];
+    sprintf_s(msg, "Billboard: procedural fallback tree card at heap %u\n", mFallbackTreeSrvHeapIndex);
+    OutputDebugStringA(msg);
 }
 
 void CrateApp::LoadBillboardTreeTexture()
 {
-    mBillboardTreeSrvHeapIndex = 0;
+    CreateFallbackTreeCardTexture();
+    mBillboardTreeSrvHeapIndex = mFallbackTreeSrvHeapIndex;
 
-    int nextHeap = 2;
-    for (const auto& kv : mTextureCache)
-        nextHeap = (std::max)(nextHeap, kv.second + 1);
-    nextHeap = (std::max)(nextHeap, (int)kTreeInstanceBillboardSrvHeapIndex + 1);
+    int nextHeap = NextSceneTextureSrvIndex(mTextureCache, (int)kForestInstanceSrvBaseIndex, (int)kReservedSrvHeapEnd);
 
+    static const char* kTexDirs[] = {
+        "../Textures/",
+        "Textures/",
+        "../../Textures/",
+        "../../../Textures/",
+    };
     static const char* kTexNames[] = {
         "tree.dds",
         "tree.png",
@@ -1109,39 +1687,26 @@ void CrateApp::LoadBillboardTreeTexture()
         "tree.jpg",
         "tree.jpeg",
     };
-    static const char* kTexDirs[] = {
-        "../Textures/",
-        "Textures/",
-        "../../Textures/",
-        "../../../Textures/",
-    };
 
     for (const char* dir : kTexDirs)
     {
         for (const char* name : kTexNames)
         {
-            const std::string path = std::string(dir) + name;
-            const std::string resolved = ResolveMediaPath(path);
-            if (!FileExistsA_Local(resolved.c_str()))
+            const std::string resolved = ResolveMediaPath(std::string(dir) + name);
+            if (!TryLoadBillboardTreeCard(resolved, nextHeap))
                 continue;
 
-            mTextures.erase("treeTex");
-            LoadModelTexture(resolved, "treeTex", nextHeap);
-
-            auto it = mTextures.find("treeTex");
-            if (it != mTextures.end() && it->second && it->second->Resource)
-            {
-                mBillboardTreeSrvHeapIndex = static_cast<UINT>(nextHeap);
-                char msg[384];
-                sprintf_s(msg, "Billboard: tree texture OK: %s (heap %u)\n", resolved.c_str(), mBillboardTreeSrvHeapIndex);
-                OutputDebugStringA(msg);
-                return;
-            }
+            mTextureCache[resolved] = nextHeap;
+            mBillboardTreeSrvHeapIndex = static_cast<UINT>(nextHeap);
+            char msg[384];
+            sprintf_s(msg, "Billboard: tree sprite OK: %s (heap %u)\n", resolved.c_str(), mBillboardTreeSrvHeapIndex);
+            OutputDebugStringA(msg);
+            return;
         }
     }
 
     OutputDebugStringA(
-        "Billboard: tree texture not found (place tree.png|dds|... under Textures/ next to exe or ../Textures/). Using wood.\n");
+        "Billboard: using built-in tree sprite (add Textures/tree.png with alpha).\n");
 }
 
 void CrateApp::LoadOBJModels()
@@ -1173,7 +1738,6 @@ void CrateApp::LoadOBJModels()
     model.Name = "Sponza";
 
     uint32_t vertexOffset = 0;
-    uint32_t indexOffset = 0;
 
     char msg[256];
     sprintf_s(msg, "Total meshes found: %d\n", scene->mNumMeshes);
@@ -1227,12 +1791,14 @@ void CrateApp::LoadOBJModels()
         if (mTextureCache.find(texPath) == mTextureCache.end())
         {
             std::string texName = "Tex_" + matName;
-            LoadModelTexture(texPath, texName, nextHeapIndex);
-            mTextureCache[texPath] = nextHeapIndex;
-            mMaterialToHeapIndex[matName] = nextHeapIndex;
-            sprintf_s(msg, "Cached texture for material %s at index %d\n", matName.c_str(), nextHeapIndex);
-            OutputDebugStringA(msg);
-            nextHeapIndex++;
+            if (LoadModelTexture(texPath, texName, nextHeapIndex))
+            {
+                mTextureCache[texPath] = nextHeapIndex;
+                mMaterialToHeapIndex[matName] = nextHeapIndex;
+                sprintf_s(msg, "Cached texture for material %s at index %d\n", matName.c_str(), nextHeapIndex);
+                OutputDebugStringA(msg);
+                nextHeapIndex++;
+            }
         }
         else
         {
@@ -1247,10 +1813,12 @@ void CrateApp::LoadOBJModels()
         if (mTextureCache.find(texPath) == mTextureCache.end())
         {
             std::string texName = "Bump_" + matName;
-            LoadModelTexture(texPath, texName, nextHeapIndex);
-            mTextureCache[texPath] = nextHeapIndex;
-            mMaterialToBumpHeapIndex[matName] = nextHeapIndex;
-            nextHeapIndex++;
+            if (LoadModelTexture(texPath, texName, nextHeapIndex))
+            {
+                mTextureCache[texPath] = nextHeapIndex;
+                mMaterialToBumpHeapIndex[matName] = nextHeapIndex;
+                nextHeapIndex++;
+            }
         }
         else
         {
@@ -1265,7 +1833,7 @@ void CrateApp::LoadOBJModels()
         sprintf_s(msg, "  Mesh %d: %d vertices, %d faces\n", m, mesh->mNumVertices, mesh->mNumFaces);
         OutputDebugStringA(msg);
 
-        uint32_t startIndex = indexOffset;
+        const uint32_t startIndex = static_cast<uint32_t>(model.Indices.size());
 
         for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
         {
@@ -1315,12 +1883,11 @@ void CrateApp::LoadOBJModels()
         submesh.MaterialName = materialName;
         submesh.Geometry.BaseVertexLocation = 0;
         submesh.Geometry.StartIndexLocation = startIndex;
-        submesh.Geometry.IndexCount = mesh->mNumFaces * 3;
+        submesh.Geometry.IndexCount = static_cast<uint32_t>(model.Indices.size()) - startIndex;
 
         model.Submeshes.push_back(submesh);
 
         vertexOffset += mesh->mNumVertices;
-        indexOffset += mesh->mNumFaces * 3;
     }
 
     sprintf_s(msg, "\nTotal vertices: %zu, indices: %zu, submeshes: %zu\n",
@@ -1363,6 +1930,392 @@ void CrateApp::LoadOBJModels()
     OutputDebugStringA("========================================\n");
     OutputDebugStringA("Sponza geometry and textures prepared\n");
     OutputDebugStringA("========================================\n\n");
+}
+
+void CrateApp::LoadPbrModel()
+{
+    mHasPbrModel = false;
+    mHasPbrCerberus = false;
+    mHasPbrWoodRoot = false;
+    mMaterialToMetallicHeapIndex.clear();
+    mMaterialToRoughnessHeapIndex.clear();
+
+    const char* cerberusPaths[] = {
+        "../Models/PBR models/Cerberus_by_Andrew_Maximov/Cerberus_LP.FBX",
+        "../Models/PBR models/Cerberus_by_Andrew_Maximov/Cerberus_LP.fbx",
+        "../Models/PBR models/Cerberus_by_Andrew_Maximov/Cerberus.FBX"
+    };
+    const char* woodRootPaths[] = {
+        "../Models/PBR models/wood_root/Aset_wood_root_M_rkswd_LOD0.fbx",
+        "../Models/PBR models/wood_root/wood_root.fbx"
+    };
+
+    mHasPbrCerberus = ImportPbrFbxModel(
+        cerberusPaths, _countof(cerberusPaths), "PbrCerberus",
+        "Cerberus_A.jpg", "Cerberus_N.jpg", "Cerberus_M.jpg", "Cerberus_R.jpg");
+    mHasPbrWoodRoot = ImportPbrFbxModel(
+        woodRootPaths, _countof(woodRootPaths), "PbrWoodRoot",
+        "Aset_wood_root_M_rkswd_2K_Albedo.jpg",
+        "Aset_wood_root_M_rkswd_2K_Normal_LOD0.jpg",
+        nullptr,
+        "Aset_wood_root_M_rkswd_2K_Roughness.jpg");
+
+    mHasPbrModel = mHasPbrCerberus || mHasPbrWoodRoot;
+    if (!mHasPbrModel)
+        OutputDebugStringA("PBR models not found in ../Models/PBR models/ — skipping.\n");
+}
+
+bool CrateApp::ImportPbrFbxModel(
+    const char* const* tryPaths,
+    size_t tryPathCount,
+    const char* geometryName,
+    const char* fallbackAlbedo,
+    const char* fallbackNormal,
+    const char* fallbackMetal,
+    const char* fallbackRough)
+{
+    Assimp::Importer importer;
+    const aiScene* scene = nullptr;
+    std::string loadedPath;
+    for (size_t pi = 0; pi < tryPathCount; ++pi)
+    {
+        const std::string resolved = ResolveMediaPath(tryPaths[pi]);
+        scene = importer.ReadFile(resolved.c_str(),
+            aiProcess_Triangulate |
+            aiProcess_FlipUVs |
+            aiProcess_GenNormals |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_ImproveCacheLocality |
+            aiProcess_CalcTangentSpace);
+
+        if (scene && scene->mRootNode && (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) == 0)
+        {
+            loadedPath = resolved;
+            break;
+        }
+        scene = nullptr;
+        importer.FreeScene();
+    }
+
+    if (!scene)
+        return false;
+
+    char msg[512];
+    sprintf_s(msg, "PBR model loaded (%s): %s\n", geometryName, loadedPath.c_str());
+    OutputDebugStringA(msg);
+
+    std::string baseDir = loadedPath;
+    const size_t slash = baseDir.find_last_of("/\\");
+    if (slash != std::string::npos)
+        baseDir = baseDir.substr(0, slash + 1);
+
+    int nextHeapIndex = 2;
+    for (const auto& cacheEntry : mTextureCache)
+        nextHeapIndex = (std::max)(nextHeapIndex, cacheEntry.second + 1);
+
+    for (unsigned int m = 0; m < scene->mNumMaterials; ++m)
+    {
+        aiMaterial* material = scene->mMaterials[m];
+        aiString matName;
+        if (material->Get(AI_MATKEY_NAME, matName) != AI_SUCCESS)
+            continue;
+
+        const std::string name = std::string("pbr_") + matName.C_Str();
+
+        auto cacheOrLoad = [&](const std::string& texPath, const std::string& texNamePrefix) -> int
+        {
+            if (texPath.empty())
+                return -1;
+            if (mTextureCache.find(texPath) != mTextureCache.end())
+                return mTextureCache[texPath];
+
+            const std::string texName = texNamePrefix + matName.C_Str();
+            if (!LoadModelTexture(texPath, texName, nextHeapIndex))
+                return -1;
+
+            mTextureCache[texPath] = nextHeapIndex;
+            return nextHeapIndex++;
+        };
+
+        std::string albedoPath;
+        if (!TryGetAssimpTexture(material, aiTextureType_BASE_COLOR, baseDir, albedoPath))
+            TryGetAssimpTexture(material, aiTextureType_DIFFUSE, baseDir, albedoPath);
+
+        std::string normalPath;
+        TryGetAssimpTexture(material, aiTextureType_NORMALS, baseDir, normalPath);
+        if (normalPath.empty())
+            TryGetAssimpTexture(material, aiTextureType_HEIGHT, baseDir, normalPath);
+
+        std::string metallicPath;
+        TryGetAssimpTexture(material, aiTextureType_METALNESS, baseDir, metallicPath);
+
+        std::string roughnessPath;
+        TryGetAssimpTexture(material, aiTextureType_DIFFUSE_ROUGHNESS, baseDir, roughnessPath);
+
+        auto assignIfLoaded = [&](const std::string& path, const std::string& prefix, std::map<std::string, int>& outMap)
+        {
+            if (path.empty())
+                return;
+            const int idx = cacheOrLoad(path, prefix);
+            if (idx >= 0)
+                outMap[name] = idx;
+        };
+
+        assignIfLoaded(albedoPath, "PBRAlbedo_", mMaterialToHeapIndex);
+        assignIfLoaded(normalPath, "PBRNormal_", mMaterialToBumpHeapIndex);
+        assignIfLoaded(metallicPath, "PBRMetal_", mMaterialToMetallicHeapIndex);
+        assignIfLoaded(roughnessPath, "PBRRough_", mMaterialToRoughnessHeapIndex);
+
+        if (fallbackAlbedo && mMaterialToHeapIndex.find(name) == mMaterialToHeapIndex.end())
+        {
+            std::string fallbackPath;
+            if (TryResolvePbrFallbackPath(baseDir, fallbackAlbedo, fallbackPath))
+                assignIfLoaded(fallbackPath, "PBRAlbedo_", mMaterialToHeapIndex);
+            if (TryResolvePbrFallbackPath(baseDir, fallbackNormal, fallbackPath))
+                assignIfLoaded(fallbackPath, "PBRNormal_", mMaterialToBumpHeapIndex);
+            if (TryResolvePbrFallbackPath(baseDir, fallbackMetal, fallbackPath))
+                assignIfLoaded(fallbackPath, "PBRMetal_", mMaterialToMetallicHeapIndex);
+            if (TryResolvePbrFallbackPath(baseDir, fallbackRough, fallbackPath))
+                assignIfLoaded(fallbackPath, "PBRRough_", mMaterialToRoughnessHeapIndex);
+        }
+    }
+
+    for (unsigned int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx)
+    {
+        aiMesh* mesh = scene->mMeshes[meshIdx];
+        if (mesh->mMaterialIndex < 0)
+            continue;
+
+        aiString matName;
+        if (scene->mMaterials[mesh->mMaterialIndex]->Get(AI_MATKEY_NAME, matName) != AI_SUCCESS)
+            continue;
+
+        const std::string name = std::string("pbr_") + matName.C_Str();
+        if (mMaterialToHeapIndex.find(name) != mMaterialToHeapIndex.end())
+            continue;
+
+        auto assignFallback = [&](const char* file, const char* prefix, std::map<std::string, int>& outMap)
+        {
+            if (!file)
+                return;
+            std::string path;
+            if (!TryResolvePbrFallbackPath(baseDir, file, path))
+                return;
+            if (mTextureCache.find(path) != mTextureCache.end())
+            {
+                outMap[name] = mTextureCache[path];
+                return;
+            }
+            const std::string texName = std::string(prefix) + matName.C_Str();
+            if (LoadModelTexture(path, texName, nextHeapIndex))
+            {
+                mTextureCache[path] = nextHeapIndex;
+                outMap[name] = nextHeapIndex;
+                ++nextHeapIndex;
+            }
+        };
+
+        assignFallback(fallbackAlbedo, "PBRAlbedo_", mMaterialToHeapIndex);
+        assignFallback(fallbackNormal, "PBRNormal_", mMaterialToBumpHeapIndex);
+        assignFallback(fallbackMetal, "PBRMetal_", mMaterialToMetallicHeapIndex);
+        assignFallback(fallbackRough, "PBRRough_", mMaterialToRoughnessHeapIndex);
+    }
+
+    LoadedModel model;
+    model.Name = geometryName;
+
+    uint32_t vertexOffset = 0;
+
+    for (unsigned int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx)
+    {
+        aiMesh* mesh = scene->mMeshes[meshIdx];
+        const uint32_t startIndex = static_cast<uint32_t>(model.Indices.size());
+
+        for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
+        {
+            Vertex v = {};
+            v.Pos = { mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z };
+            if (mesh->HasNormals())
+                v.Normal = { mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z };
+            if (mesh->HasTextureCoords(0))
+            {
+                v.TexC.x = mesh->mTextureCoords[0][i].x;
+                v.TexC.y = mesh->mTextureCoords[0][i].y;
+            }
+            model.Vertices.push_back(v);
+        }
+
+        for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
+        {
+            const aiFace& face = mesh->mFaces[f];
+            for (unsigned int j = 0; j < face.mNumIndices; ++j)
+                model.Indices.push_back(face.mIndices[j] + vertexOffset);
+        }
+
+        std::string materialName = "pbr_default";
+        if (mesh->mMaterialIndex >= 0)
+        {
+            aiString matName;
+            if (scene->mMaterials[mesh->mMaterialIndex]->Get(AI_MATKEY_NAME, matName) == AI_SUCCESS)
+                materialName = std::string("pbr_") + matName.C_Str();
+        }
+
+        SubmeshData submesh;
+        submesh.MaterialName = materialName;
+        submesh.Geometry.StartIndexLocation = startIndex;
+        submesh.Geometry.IndexCount = static_cast<uint32_t>(model.Indices.size()) - startIndex;
+        submesh.Geometry.BaseVertexLocation = 0;
+        model.Submeshes.push_back(submesh);
+
+        vertexOffset += mesh->mNumVertices;
+    }
+
+    if (model.Vertices.empty() || model.Indices.empty())
+    {
+        sprintf_s(msg, "PBR model %s has no geometry.\n", geometryName);
+        OutputDebugStringA(msg);
+        return false;
+    }
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = model.Name;
+
+    const UINT vbByteSize = (UINT)model.Vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)model.Indices.size() * sizeof(uint32_t);
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), model.Vertices.data(), vbByteSize);
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), model.Indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), model.Vertices.data(), vbByteSize, geo->VertexBufferUploader);
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), model.Indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    for (size_t i = 0; i < model.Submeshes.size(); ++i)
+    {
+        const std::string submeshName = "submesh_" + std::to_string(i) + "_" + model.Submeshes[i].MaterialName;
+        geo->DrawArgs[submeshName] = model.Submeshes[i].Geometry;
+    }
+
+    mGeometries[geo->Name] = std::move(geo);
+    mLoadedModels.push_back(std::move(model));
+    sprintf_s(msg, "PBR geometry prepared: %s\n", geometryName);
+    OutputDebugStringA(msg);
+    return true;
+}
+
+void CrateApp::AddPbrModelRenderItems(
+    const char* geometryName,
+    float worldX,
+    float worldZ,
+    float rotationY,
+    float targetHeight,
+    int& objIndex,
+    XMFLOAT3* outCenter)
+{
+    auto pbrGeo = mGeometries[geometryName].get();
+    const LoadedModel* pbrModel = nullptr;
+    for (const auto& m : mLoadedModels)
+    {
+        if (m.Name == geometryName)
+        {
+            pbrModel = &m;
+            break;
+        }
+    }
+
+    if (!pbrGeo || !pbrModel)
+        return;
+
+    float minModelY = pbrModel->Vertices[0].Pos.y;
+    float maxModelY = pbrModel->Vertices[0].Pos.y;
+    for (const Vertex& v : pbrModel->Vertices)
+    {
+        minModelY = (std::min)(minModelY, v.Pos.y);
+        maxModelY = (std::max)(maxModelY, v.Pos.y);
+    }
+    const float modelHeight = (std::max)(maxModelY - minModelY, 1e-3f);
+    const float pbrScale = targetHeight / modelHeight;
+    const float pbrY = -1.0f - minModelY * pbrScale;
+
+    const XMMATRIX pbrWorld =
+        XMMatrixScaling(pbrScale, pbrScale, pbrScale) *
+        XMMatrixRotationY(rotationY) *
+        XMMatrixTranslation(worldX, pbrY, worldZ);
+
+    XMVECTOR center = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
+    for (const Vertex& v : pbrModel->Vertices)
+        center = XMVectorAdd(center, XMLoadFloat3(&v.Pos));
+    center = XMVectorScale(center, 1.0f / (float)pbrModel->Vertices.size());
+    center = XMVector3TransformCoord(center, pbrWorld);
+
+    XMFLOAT3 centerStore;
+    XMStoreFloat3(&centerStore, center);
+    if (outCenter)
+        *outCenter = centerStore;
+
+    auto initTexTransforms = [](RenderItem* ri) {
+        XMMATRIX scale = XMMatrixScaling(ri->TextureScaleU, ri->TextureScaleV, 1.0f);
+        XMMATRIX translation = XMMatrixTranslation(ri->TextureOffsetU, ri->TextureOffsetV, 0.0f);
+        XMMATRIX texTransform = scale * translation;
+        XMStoreFloat4x4(&ri->TexTransform, texTransform);
+        XMStoreFloat4x4(&ri->TexTransformDisp, texTransform);
+        ri->NumFramesDirty = gNumFrameResources;
+    };
+
+    size_t pbrItemsAdded = 0;
+    char msg[256];
+    for (size_t i = 0; i < pbrModel->Submeshes.size(); ++i)
+    {
+        const auto& submesh = pbrModel->Submeshes[i];
+        const std::string submeshName = "submesh_" + std::to_string(i) + "_" + submesh.MaterialName;
+        auto drawArg = pbrGeo->DrawArgs.find(submeshName);
+        if (drawArg == pbrGeo->DrawArgs.end())
+            continue;
+
+        auto matIt = mMaterials.find(submesh.MaterialName);
+        if (matIt == mMaterials.end())
+        {
+            sprintf_s(msg, "PBR %s: material %s not found, submesh skipped\n",
+                geometryName, submesh.MaterialName.c_str());
+            OutputDebugStringA(msg);
+            continue;
+        }
+
+        auto renderItem = std::make_unique<RenderItem>();
+        renderItem->ObjCBIndex = objIndex++;
+        renderItem->Mat = matIt->second.get();
+        renderItem->Geo = pbrGeo;
+        renderItem->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+        renderItem->IndexCount = drawArg->second.IndexCount;
+        renderItem->StartIndexLocation = drawArg->second.StartIndexLocation;
+        renderItem->BaseVertexLocation = drawArg->second.BaseVertexLocation;
+        XMStoreFloat4x4(&renderItem->World, pbrWorld);
+        renderItem->AnimateTexture = false;
+        renderItem->TextureScaleU = 1.0f;
+        renderItem->TextureScaleV = 1.0f;
+        initTexTransforms(renderItem.get());
+        mAllRitems.push_back(std::move(renderItem));
+        ++pbrItemsAdded;
+    }
+
+    sprintf_s(
+        msg,
+        "PBR %s: %zu items at (%.1f, %.1f, %.1f), scale %.4f\n",
+        geometryName,
+        pbrItemsAdded,
+        centerStore.x,
+        centerStore.y,
+        centerStore.z,
+        pbrScale);
+    OutputDebugStringA(msg);
 }
 
 void CrateApp::LoadSlendermanModel()
@@ -1418,12 +2371,11 @@ void CrateApp::LoadSlendermanModel()
     model.Name = "Slenderman";
 
     uint32_t vertexOffset = 0;
-    uint32_t indexOffset = 0;
 
     for (unsigned int meshIdx = 0; meshIdx < scene->mNumMeshes; ++meshIdx)
     {
         aiMesh* mesh = scene->mMeshes[meshIdx];
-        const uint32_t startIndex = indexOffset;
+        const uint32_t startIndex = static_cast<uint32_t>(model.Indices.size());
 
         for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
         {
@@ -1455,12 +2407,11 @@ void CrateApp::LoadSlendermanModel()
         SubmeshData submesh;
         submesh.MaterialName = materialName;
         submesh.Geometry.StartIndexLocation = startIndex;
-        submesh.Geometry.IndexCount = mesh->mNumFaces * 3;
+        submesh.Geometry.IndexCount = static_cast<uint32_t>(model.Indices.size()) - startIndex;
         submesh.Geometry.BaseVertexLocation = 0;
         model.Submeshes.push_back(submesh);
 
         vertexOffset += mesh->mNumVertices;
-        indexOffset += mesh->mNumFaces * 3;
     }
 
     if (model.Vertices.empty() || model.Submeshes.empty())
@@ -1651,11 +2602,7 @@ void CrateApp::LoadTreeLodMesh()
     }
 
     auto allocNextTreeHeap = [&]() -> int {
-        int nh = 2;
-        for (const auto& kv : mTextureCache)
-            nh = (std::max)(nh, kv.second + 1);
-        nh = (std::max)(nh, (int)kTreeInstanceBillboardSrvHeapIndex + 1);
-        return nh;
+        return NextSceneTextureSrvIndex(mTextureCache, (int)kForestInstanceSrvBaseIndex, (int)kReservedSrvHeapEnd);
     };
 
     auto tryLoadTreeDiffusePath = [&](const std::string& fullTexPath, const char* reasonTag) -> bool {
@@ -1728,7 +2675,7 @@ void CrateApp::LoadTreeLodMesh()
     }
 
     if (mTreeMtlDiffuseSrvHeapIndex == 0)
-        OutputDebugStringA("Tree LOD: нет текстуры для меша — для LOD0 используется та же, что у билборда (../Textures/tree.*).\n");
+        OutputDebugStringA("Tree LOD: bark/leaves не найдены — меш рисуется однотонным зелёным.\n");
 }
 
 void CrateApp::LoadTextures()
@@ -1751,6 +2698,169 @@ void CrateApp::LoadTextures()
         checkerTex->Resource, checkerTex->UploadHeap));
     mTextures[checkerTex->Name] = std::move(checkerTex);
     OutputDebugStringA("Wood crate texture loaded\n");
+}
+
+void CrateApp::LoadIblTextures()
+{
+    OutputDebugStringA("Loading IBL textures...\n");
+    mIblTexturesLoaded = false;
+
+    const char* irradiancePaths[] = {
+        "../Models/IrradianceMap_BC6U.dds",
+        "../Models/irradiance.dds"
+    };
+    const char* prefilterPaths[] = {
+        "../Models/PreFilteredEnvMap_BC6U.dds",
+        "../Models/prefilter.dds"
+    };
+    const char* integrationPaths[] = {
+        "../Models/IntegrationMap.dds",
+        "../Models/brdf_lut.dds"
+    };
+
+    bool okIrr = false;
+    for (const char* p : irradiancePaths)
+    {
+        if (TryLoadDdsTexture(md3dDevice.Get(), mCommandList.Get(), p, "irradianceMap", mTextures))
+        {
+            okIrr = true;
+            break;
+        }
+    }
+    bool okPre = false;
+    for (const char* p : prefilterPaths)
+    {
+        if (TryLoadDdsTexture(md3dDevice.Get(), mCommandList.Get(), p, "prefilterEnvMap", mTextures))
+        {
+            okPre = true;
+            break;
+        }
+    }
+    bool okBrdf = false;
+    for (const char* p : integrationPaths)
+    {
+        if (TryLoadDdsTexture(md3dDevice.Get(), mCommandList.Get(), p, "integrationMap", mTextures))
+        {
+            okBrdf = true;
+            break;
+        }
+    }
+
+    mIblTexturesLoaded = okIrr && okPre && okBrdf;
+    if (!mIblTexturesLoaded)
+        CreateProceduralIblTextures();
+
+    mIblMaxReflectionLod = 4.0f;
+    if (mIblTexturesLoaded)
+    {
+        auto preIt = mTextures.find("prefilterEnvMap");
+        if (preIt != mTextures.end() && preIt->second && preIt->second->Resource)
+        {
+            const UINT mipLevels = preIt->second->Resource->GetDesc().MipLevels;
+            mIblMaxReflectionLod = static_cast<float>((std::max)(1u, mipLevels) - 1u);
+        }
+
+        char msg[160];
+        sprintf_s(
+            msg,
+            "IBL OK: irradiance + prefilter + BRDF loaded (max reflection LOD = %.0f). F8 toggles IBL.\n",
+            mIblMaxReflectionLod);
+        OutputDebugStringA(msg);
+    }
+    else
+    {
+        char miss[256];
+        sprintf_s(
+            miss,
+            "IBL MISSING: irradiance=%s prefilter=%s brdf=%s — add DDS to ../Models/\n",
+            okIrr ? "ok" : "no",
+            okPre ? "ok" : "no",
+            okBrdf ? "ok" : "no");
+        OutputDebugStringA(miss);
+    }
+}
+
+void CrateApp::CreateProceduralIblTextures()
+{
+    constexpr UINT kCubeBase = 64;
+    constexpr UINT kCubeMips = 5;
+    constexpr UINT kBrdfSize = 128;
+
+    std::vector<std::vector<std::vector<uint8_t>>> prefilterMips(kCubeMips);
+    std::vector<std::vector<uint8_t>> currentFaces(6);
+    for (UINT face = 0; face < 6; ++face)
+        FillCubeFaceSky(face, kCubeBase, currentFaces[face]);
+    prefilterMips[0] = currentFaces;
+
+    UINT size = kCubeBase;
+    for (UINT mip = 1; mip < kCubeMips; ++mip)
+    {
+        size /= 2;
+        DownsampleCubeFaces(prefilterMips[mip - 1], size * 2, prefilterMips[mip], size);
+    }
+
+    std::vector<std::vector<uint8_t>> irradianceFaces(6);
+    DownsampleCubeFaces(prefilterMips[2], 16, irradianceFaces, 16);
+
+    std::vector<float> brdfPixels((size_t)kBrdfSize * kBrdfSize * 2);
+    for (UINT y = 0; y < kBrdfSize; ++y)
+    {
+        const float roughness = (y + 0.5f) / kBrdfSize;
+        for (UINT x = 0; x < kBrdfSize; ++x)
+        {
+            const float nDotV = (x + 0.5f) / kBrdfSize;
+            const XMFLOAT2 ab = EnvBrdfApprox(roughness, nDotV);
+            const size_t i = ((size_t)y * kBrdfSize + x) * 2;
+            brdfPixels[i + 0] = ab.x;
+            brdfPixels[i + 1] = ab.y;
+        }
+    }
+
+    auto storeCube = [&](const std::string& name, ComPtr<ID3D12Resource>& tex, ComPtr<ID3D12Resource>& upload,
+        const std::vector<std::vector<std::vector<uint8_t>>>& mips, UINT mipsCount, UINT base)
+    {
+        if (!UploadTextureCubeMipChain(md3dDevice.Get(), mCommandList.Get(), base, mipsCount, mips, tex, upload))
+            return false;
+        auto entry = std::make_unique<Texture>();
+        entry->Name = name;
+        entry->Resource = tex;
+        entry->UploadHeap = upload;
+        mTextures[name] = std::move(entry);
+        return true;
+    };
+
+    ComPtr<ID3D12Resource> preTex, preUpload;
+    ComPtr<ID3D12Resource> irrTex, irrUpload;
+    ComPtr<ID3D12Resource> brdfTex, brdfUpload;
+
+    const bool okPre = storeCube("prefilterEnvMap", preTex, preUpload, prefilterMips, kCubeMips, kCubeBase);
+    const std::vector<std::vector<std::vector<uint8_t>>> irradianceMips = { irradianceFaces };
+    const bool okIrr = storeCube("irradianceMap", irrTex, irrUpload, irradianceMips, 1, 16);
+    const bool okBrdf = UploadTexture2D(
+        md3dDevice.Get(), mCommandList.Get(), kBrdfSize, kBrdfSize,
+        DXGI_FORMAT_R32G32_FLOAT, brdfPixels.data(), sizeof(float) * 2, brdfTex, brdfUpload);
+
+    if (okBrdf)
+    {
+        auto entry = std::make_unique<Texture>();
+        entry->Name = "integrationMap";
+        entry->Resource = brdfTex;
+        entry->UploadHeap = brdfUpload;
+        mTextures["integrationMap"] = std::move(entry);
+    }
+
+    mIblTexturesLoaded = okPre && okIrr && okBrdf;
+    mIblMaxReflectionLod = static_cast<float>(kCubeMips - 1);
+
+    if (mIblTexturesLoaded)
+    {
+        OutputDebugStringA(
+            "IBL PROCEDURAL: generated sky cubemap + BRDF LUT (DDS not found in ../Models/). F8 toggles IBL.\n");
+    }
+    else
+    {
+        OutputDebugStringA("IBL PROCEDURAL: generation failed.\n");
+    }
 }
 
 void CrateApp::BuildRootSignature()
@@ -1897,6 +3007,9 @@ void CrateApp::BuildMaterials()
     for (const auto& entry : mMaterialToHeapIndex)
     {
         const std::string& matName = entry.first;
+        if (matName.rfind("pbr_", 0) == 0)
+            continue;
+
         int heapIndex = entry.second;
 
         auto material = std::make_unique<Material>();
@@ -1921,22 +3034,49 @@ void CrateApp::BuildMaterials()
         material->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
         material->FresnelR0 = XMFLOAT3(0.05f, 0.05f, 0.05f);
         material->Roughness = 0.2f;
-        if (matName.find("floor") != std::string::npos ||
-            matName.find("bricks") != std::string::npos ||
-            matName.find("lion") != std::string::npos)
-        {
-            material->TessellationParams = XMFLOAT4(0.12f, -0.06f, 90.0f, 1.0f);
-        }
-        else
-        {
-            material->TessellationParams = XMFLOAT4(0.0f, 0.0f, 80.0f, 0.0f);
-        }
+        material->TessellationParams = XMFLOAT4(0.0f, 0.0f, 80.0f, 1.0f);
 
         mMaterials[matName] = std::move(material);
 
         char msg[256];
         sprintf_s(msg, "Created material %s diffuse %d\n", matName.c_str(), heapIndex);
         OutputDebugStringA(msg);
+    }
+
+    for (const auto& entry : mMaterialToHeapIndex)
+    {
+        if (entry.first.rfind("pbr_", 0) != 0)
+            continue;
+
+        auto material = std::make_unique<Material>();
+        material->Name = entry.first;
+        material->MatCBIndex = (int)mMaterials.size();
+        material->DiffuseSrvHeapIndex = entry.second;
+
+        auto bumpIt = mMaterialToBumpHeapIndex.find(entry.first);
+        material->NormalSrvHeapIndex = bumpIt != mMaterialToBumpHeapIndex.end() ? bumpIt->second : entry.second;
+
+        auto metalIt = mMaterialToMetallicHeapIndex.find(entry.first);
+        material->MetallicSrvHeapIndex = metalIt != mMaterialToMetallicHeapIndex.end() ? metalIt->second : -1;
+
+        auto roughIt = mMaterialToRoughnessHeapIndex.find(entry.first);
+        material->RoughnessSrvHeapIndex = roughIt != mMaterialToRoughnessHeapIndex.end() ? roughIt->second : -1;
+
+        material->DiffuseSrvHeapIndex2 = -1;
+        material->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+        material->FresnelR0 = XMFLOAT3(0.04f, 0.04f, 0.04f);
+        material->Metallic = 1.0f;
+        material->Roughness = 1.0f;
+        material->TessellationParams = XMFLOAT4(0.0f, 0.0f, 80.0f, 1.0f);
+        const bool hasMetalMap = material->MetallicSrvHeapIndex >= 0;
+        const bool hasRoughMap = material->RoughnessSrvHeapIndex >= 0;
+        const bool hasPbrMaps = hasMetalMap && hasRoughMap;
+        material->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, hasPbrMaps ? 1.0f : 0.0f);
+        if (!hasMetalMap)
+            material->Metallic = 0.0f;
+        if (!hasRoughMap)
+            material->Roughness = hasMetalMap ? 1.0f : 0.75f;
+        mMaterials[entry.first] = std::move(material);
     }
 
     for (const auto& entry : mSlendermanMaterialAlbedo)
@@ -1965,10 +3105,10 @@ void CrateApp::BuildMaterials()
     water->FresnelR0 = XMFLOAT3(0.06f, 0.1f, 0.14f);
     water->Roughness = 0.04f;
     water->TessellationParams = XMFLOAT4(0.35f, 0.0f, 140.0f, 1.0f);
-    water->ChessboardParams = XMFLOAT4(1.2f, 1.2f, 0.0f, 1.0f);
+    water->ChessboardParams = XMFLOAT4(1.2f, 1.2f, 0.0f, 0.0f);
     mMaterials["water"] = std::move(water);
 
-    const UINT treeSrv = mBillboardTreeSrvHeapIndex != 0 ? mBillboardTreeSrvHeapIndex : 0u;
+    const UINT treeSrv = mBillboardTreeSrvHeapIndex != 0 ? mBillboardTreeSrvHeapIndex : mFallbackTreeSrvHeapIndex;
 
     auto billboardTree = std::make_unique<Material>();
     billboardTree->Name = "billboardTree";
@@ -1976,13 +3116,31 @@ void CrateApp::BuildMaterials()
     billboardTree->DiffuseSrvHeapIndex = treeSrv;
     billboardTree->DiffuseSrvHeapIndex2 = treeSrv;
     billboardTree->NormalSrvHeapIndex = treeSrv;
-    billboardTree->DiffuseAlbedo =
-        mBillboardTreeSrvHeapIndex != 0 ? XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f) : XMFLOAT4(0.85f, 0.95f, 0.78f, 1.0f);
+    billboardTree->DiffuseAlbedo = XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
     billboardTree->FresnelR0 = XMFLOAT3(0.04f, 0.06f, 0.04f);
     billboardTree->Roughness = 0.55f;
     billboardTree->TessellationParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
     billboardTree->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
     mMaterials["billboardTree"] = std::move(billboardTree);
+
+    const bool meshSolidColor = (mTreeMtlDiffuseSrvHeapIndex == 0);
+    const UINT meshTreeSrv = meshSolidColor ? treeSrv : mTreeMtlDiffuseSrvHeapIndex;
+    auto treeMeshLod = std::make_unique<Material>();
+    treeMeshLod->Name = "treeMeshLod";
+    treeMeshLod->MatCBIndex = (int)mMaterials.size();
+    treeMeshLod->DiffuseSrvHeapIndex = meshTreeSrv;
+    treeMeshLod->DiffuseSrvHeapIndex2 = meshTreeSrv;
+    treeMeshLod->NormalSrvHeapIndex = meshTreeSrv;
+    treeMeshLod->DiffuseAlbedo = meshSolidColor
+        ? XMFLOAT4(0.18f, 0.55f, 0.22f, 1.0f)
+        : XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+    treeMeshLod->FresnelR0 = XMFLOAT3(0.04f, 0.06f, 0.04f);
+    treeMeshLod->Roughness = 0.65f;
+    treeMeshLod->TessellationParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+    treeMeshLod->ChessboardParams = meshSolidColor
+        ? XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f)
+        : XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+    mMaterials["treeMeshLod"] = std::move(treeMeshLod);
 
     OutputDebugStringA("Materials built\n");
 }
@@ -2078,6 +3236,17 @@ void CrateApp::BuildRenderItems()
         mAllRitems.push_back(std::move(renderItem));
     }
 
+    if (mHasPbrCerberus)
+    {
+        AddPbrModelRenderItems("PbrCerberus", 6.0f, -30.0f, 0.85f, 5.0f, objIndex, &mPbrWorldCenter);
+        SetupPbrPointLight();
+    }
+
+    if (mHasPbrWoodRoot)
+    {
+        AddPbrModelRenderItems("PbrWoodRoot", 1.5f, -29.0f, 0.25f, 4.0f, objIndex);
+    }
+
     if (mHasSlenderman)
     {
         auto slenderGeo = mGeometries["Slenderman"].get();
@@ -2093,7 +3262,6 @@ void CrateApp::BuildRenderItems()
 
         if (slenderGeo && slenderModel)
         {
-            // Center of billboard forest patch (see kForestPatchCenter*).
             constexpr float slenderScale = 1.05f;
             const float slenderX = kForestPatchCenterX;
             const float slenderZ = kForestPatchCenterZ;
@@ -2330,6 +3498,33 @@ void CrateApp::BuildStressTestObjects(int& objIndex)
     OutputDebugStringA(msg);
 }
 
+void CrateApp::SetupPbrPointLight()
+{
+    if (!mHasPbrModel)
+        return;
+
+    PointLightSource& L = mPointLights[kPbrPointLightIndex];
+    L.Position = {
+        mPbrWorldCenter.x + 2.5f,
+        mPbrWorldCenter.y + 2.0f,
+        mPbrWorldCenter.z + 2.2f
+    };
+    L.Strength = { 1.6f, 1.25f, 0.85f };
+    L.FalloffStart = 0.4f;
+    L.FalloffEnd = 16.0f;
+    mFallingActive[kPbrPointLightIndex] = true;
+    mFallingVelY[kPbrPointLightIndex] = 0.0f;
+
+    char msg[160];
+    sprintf_s(
+        msg,
+        "PBR point light at (%.1f, %.1f, %.1f)\n",
+        L.Position.x,
+        L.Position.y,
+        L.Position.z);
+    OutputDebugStringA(msg);
+}
+
 void CrateApp::UpdateStressVisibility()
 {
     mStressVisibleRitems.clear();
@@ -2374,73 +3569,83 @@ void CrateApp::UpdateStressVisibility()
         }
     }
 
-    if (visibleIndices.size() > kMaxStressDrawsPerFrame)
-    {
-        const XMVECTOR eye = XMLoadFloat3(&mEyePos);
-        std::partial_sort(
-            visibleIndices.begin(),
-            visibleIndices.begin() + static_cast<std::ptrdiff_t>(kMaxStressDrawsPerFrame),
-            visibleIndices.end(),
-            [&](size_t ia, size_t ib)
-            {
-                const XMVECTOR ca = XMLoadFloat3(&mStressWorldBounds[ia].Center);
-                const XMVECTOR cb = XMLoadFloat3(&mStressWorldBounds[ib].Center);
-                const float da = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(ca, eye)));
-                const float db = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(cb, eye)));
-                return da < db;
-            });
-        visibleIndices.resize(kMaxStressDrawsPerFrame);
-    }
-
     mStressVisibleRitems.reserve(visibleIndices.size());
     for (size_t index : visibleIndices)
         mStressVisibleRitems.push_back(mStressRitems[index]);
 }
 
-void CrateApp::UpdateForestLod()
+void CrateApp::UpdateForestLod(UINT frameIndex)
 {
-    if (mForestInstancesCpu.empty() || !mForestMeshMapped || !mForestBillboardMapped)
+    if (frameIndex >= gNumFrameResources)
+        return;
+    if (mForestInstancesCpu.empty() || !mForestMeshMapped[frameIndex] || !mForestBillboardMapped[frameIndex])
         return;
 
     const XMVECTOR eye = XMLoadFloat3(&mEyePos);
-    const float meshSq = kForestLodMeshDistance * kForestLodMeshDistance;
+    const float nearSq = kForestLodMeshNear * kForestLodMeshNear;
+    const float farSq = kForestLodMeshFar * kForestLodMeshFar;
 
     TreeInstanceGpu meshBuf[kMaxForestInstances];
     TreeInstanceGpu billBuf[kMaxForestInstances];
     UINT nMesh = 0;
     UINT nBill = 0;
 
-    for (const TreeInstanceGpu& t : mForestInstancesCpu)
+    const size_t instanceCount = mForestInstancesCpu.size();
+    if (mForestLodUsesMesh.size() != instanceCount)
+        mForestLodUsesMesh.assign(instanceCount, 0);
+
+    for (size_t i = 0; i < instanceCount; ++i)
     {
+        const TreeInstanceGpu& t = mForestInstancesCpu[i];
         XMVECTOR p = XMLoadFloat3(&t.WorldPos);
         const float d2 = XMVectorGetX(XMVector3LengthSq(XMVectorSubtract(p, eye)));
 
-        if (mTreeLodMeshLoaded && d2 < meshSq)
+        bool useMesh = mForestLodUsesMesh[i] != 0;
+        if (mTreeLodMeshLoaded)
+        {
+            if (useMesh)
+            {
+                if (d2 > farSq)
+                    useMesh = false;
+            }
+            else if (d2 < nearSq)
+            {
+                useMesh = true;
+            }
+        }
+        else
+        {
+            useMesh = false;
+        }
+        mForestLodUsesMesh[i] = useMesh ? 1 : 0;
+
+        if (useMesh)
         {
             if (nMesh < kMaxForestInstances)
                 meshBuf[nMesh++] = t;
         }
-        else
+        else if (nBill < kMaxForestInstances)
         {
-            if (nBill < kMaxForestInstances)
-                billBuf[nBill++] = t;
+            billBuf[nBill++] = t;
         }
     }
 
-    mForestMeshCount = nMesh;
-    mForestBillboardCount = nBill;
+    mForestMeshCount[frameIndex] = nMesh;
+    mForestBillboardCount[frameIndex] = nBill;
 
     if (nMesh > 0)
-        std::memcpy(mForestMeshMapped, meshBuf, (size_t)nMesh * sizeof(TreeInstanceGpu));
+        std::memcpy(mForestMeshMapped[frameIndex], meshBuf, (size_t)nMesh * sizeof(TreeInstanceGpu));
     if (nBill > 0)
-        std::memcpy(mForestBillboardMapped, billBuf, (size_t)nBill * sizeof(TreeInstanceGpu));
+        std::memcpy(mForestBillboardMapped[frameIndex], billBuf, (size_t)nBill * sizeof(TreeInstanceGpu));
 }
 
 void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
 {
     if (mBillboardForestInstanceCount == 0 || !mRenderingSystem)
         return;
-    if (mForestMeshCount == 0 && mForestBillboardCount == 0)
+    const UINT meshCount = mForestMeshCount[mCurrFrameResourceIndex];
+    const UINT billCount = mForestBillboardCount[mCurrFrameResourceIndex];
+    if (meshCount == 0 && billCount == 0)
         return;
 
     auto matIt = mMaterials.find("billboardTree");
@@ -2475,7 +3680,7 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
     cmdList->SetGraphicsRootDescriptorTable(4, checkerTex);
     cmdList->SetGraphicsRootDescriptorTable(5, texB);
 
-    if (mForestBillboardCount > 0)
+    if (billCount > 0)
     {
         auto geoIt = mGeometries.find("BillboardQuad");
         if (geoIt != mGeometries.end())
@@ -2484,8 +3689,9 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
             auto drawArg = geo->DrawArgs.find("tree");
             if (drawArg != geo->DrawArgs.end())
             {
+                const UINT billSrvIndex = kForestInstanceSrvBaseIndex + mCurrFrameResourceIndex * 2u + 1u;
                 CD3DX12_GPU_DESCRIPTOR_HANDLE inst(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-                inst.Offset(kTreeInstanceBillboardSrvHeapIndex, mCbvSrvDescriptorSize);
+                inst.Offset(billSrvIndex, mCbvSrvDescriptorSize);
                 cmdList->SetGraphicsRootDescriptorTable(6, inst);
 
                 cmdList->SetPipelineState(mRenderingSystem->GetBillboardTreePSO());
@@ -2497,7 +3703,7 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
 
                 cmdList->DrawIndexedInstanced(
                     drawArg->second.IndexCount,
-                    mForestBillboardCount,
+                    billCount,
                     drawArg->second.StartIndexLocation,
                     drawArg->second.BaseVertexLocation,
                     0);
@@ -2505,8 +3711,26 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
         }
     }
 
-    if (mForestMeshCount > 0 && mTreeLodMeshLoaded)
+    if (meshCount > 0 && mTreeLodMeshLoaded)
     {
+        auto meshMatIt = mMaterials.find("treeMeshLod");
+        if (meshMatIt != mMaterials.end())
+        {
+        Material* meshMat = meshMatIt->second.get();
+
+        CD3DX12_GPU_DESCRIPTOR_HANDLE meshTex(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        meshTex.Offset(meshMat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE meshNrm(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        meshNrm.Offset(meshMat->NormalSrvHeapIndex >= 0 ? meshMat->NormalSrvHeapIndex : meshMat->DiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE meshTexB(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        const int meshAltIdx = meshMat->DiffuseSrvHeapIndex2 >= 0 ? meshMat->DiffuseSrvHeapIndex2 : meshMat->DiffuseSrvHeapIndex;
+        meshTexB.Offset(meshAltIdx, mCbvSrvDescriptorSize);
+
+        cmdList->SetGraphicsRootDescriptorTable(0, meshTex);
+        cmdList->SetGraphicsRootConstantBufferView(3, matCB->GetGPUVirtualAddress() + (UINT64)meshMat->MatCBIndex * matCBByteSize);
+        cmdList->SetGraphicsRootDescriptorTable(4, meshNrm);
+        cmdList->SetGraphicsRootDescriptorTable(5, meshTexB);
+
         auto meshIt = mGeometries.find("TreeLodMesh");
         if (meshIt != mGeometries.end())
         {
@@ -2514,16 +3738,9 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
             auto meshArg = treeGeo->DrawArgs.find("treeMesh");
             if (meshArg != treeGeo->DrawArgs.end())
             {
-                if (mTreeMtlDiffuseSrvHeapIndex != 0)
-                {
-                    CD3DX12_GPU_DESCRIPTOR_HANDLE texMtl(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-                    texMtl.Offset(mTreeMtlDiffuseSrvHeapIndex, mCbvSrvDescriptorSize);
-                    cmdList->SetGraphicsRootDescriptorTable(0, texMtl);
-                    cmdList->SetGraphicsRootDescriptorTable(5, texMtl);
-                }
-
+                const UINT meshSrvIndex = kForestInstanceSrvBaseIndex + mCurrFrameResourceIndex * 2u;
                 CD3DX12_GPU_DESCRIPTOR_HANDLE inst(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-                inst.Offset(kTreeInstanceMeshSrvHeapIndex, mCbvSrvDescriptorSize);
+                inst.Offset(meshSrvIndex, mCbvSrvDescriptorSize);
                 cmdList->SetGraphicsRootDescriptorTable(6, inst);
 
                 cmdList->SetPipelineState(mRenderingSystem->GetTreeMeshInstancedPSO());
@@ -2535,11 +3752,12 @@ void CrateApp::DrawBillboardForest(ID3D12GraphicsCommandList* cmdList)
 
                 cmdList->DrawIndexedInstanced(
                     meshArg->second.IndexCount,
-                    mForestMeshCount,
+                    meshCount,
                     meshArg->second.StartIndexLocation,
                     meshArg->second.BaseVertexLocation,
                     0);
             }
+        }
         }
     }
 }
@@ -2576,6 +3794,15 @@ void CrateApp::DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const s
         cmdList->SetGraphicsRootDescriptorTable(4, heightSrv);
         cmdList->SetGraphicsRootConstantBufferView(0, objCBAddress);
         cmdList->SetGraphicsRootConstantBufferView(2, matCBAddress);
+
+        const UINT indexCapacity = ri->Geo->IndexBufferByteSize / sizeof(uint32_t);
+        if (ri->IndexCount == 0 ||
+            ri->StartIndexLocation >= indexCapacity ||
+            ri->StartIndexLocation + ri->IndexCount > indexCapacity)
+        {
+            continue;
+        }
+
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
 }
@@ -2609,6 +3836,12 @@ void CrateApp::DrawRenderItems(
         CD3DX12_GPU_DESCRIPTOR_HANDLE texB(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
         const int altIdx = ri->Mat->DiffuseSrvHeapIndex2 >= 0 ? ri->Mat->DiffuseSrvHeapIndex2 : ri->Mat->DiffuseSrvHeapIndex;
         texB.Offset(altIdx, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE metal(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        const int metalIdx = ri->Mat->MetallicSrvHeapIndex >= 0 ? ri->Mat->MetallicSrvHeapIndex : ri->Mat->DiffuseSrvHeapIndex;
+        metal.Offset(metalIdx, mCbvSrvDescriptorSize);
+        CD3DX12_GPU_DESCRIPTOR_HANDLE rough(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        const int roughIdx = ri->Mat->RoughnessSrvHeapIndex >= 0 ? ri->Mat->RoughnessSrvHeapIndex : ri->Mat->DiffuseSrvHeapIndex;
+        rough.Offset(roughIdx, mCbvSrvDescriptorSize);
 
         D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objectCB->GetGPUVirtualAddress() + ri->ObjCBIndex * objCBByteSize;
         D3D12_GPU_VIRTUAL_ADDRESS matCBAddress = matCB->GetGPUVirtualAddress() + ri->Mat->MatCBIndex * matCBByteSize;
@@ -2616,8 +3849,18 @@ void CrateApp::DrawRenderItems(
         cmdList->SetGraphicsRootDescriptorTable(0, tex);
         cmdList->SetGraphicsRootDescriptorTable(4, nrm);
         cmdList->SetGraphicsRootDescriptorTable(5, texB);
+        cmdList->SetGraphicsRootDescriptorTable(6, metal);
+        cmdList->SetGraphicsRootDescriptorTable(7, rough);
         cmdList->SetGraphicsRootConstantBufferView(1, objCBAddress);
         cmdList->SetGraphicsRootConstantBufferView(3, matCBAddress);
+
+        const UINT indexCapacity = ri->Geo->IndexBufferByteSize / sizeof(uint32_t);
+        if (ri->IndexCount == 0 ||
+            ri->StartIndexLocation >= indexCapacity ||
+            ri->StartIndexLocation + ri->IndexCount > indexCapacity)
+        {
+            continue;
+        }
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
@@ -2625,15 +3868,52 @@ void CrateApp::DrawRenderItems(
 
 void CrateApp::UpdateCamera(const GameTimer& gt)
 {
-    mEyePos.x = mRadius * sinf(mPhi) * cosf(mTheta);
-    mEyePos.z = mRadius * sinf(mPhi) * sinf(mTheta);
-    mEyePos.y = mRadius * cosf(mPhi);
+    const float sinPhi = sinf(mPhi);
+    const float cosPhi = cosf(mPhi);
+    const float sinTheta = sinf(mTheta);
+    const float cosTheta = cosf(mTheta);
 
-    XMVECTOR pos = XMVectorSet(mEyePos.x, mEyePos.y, mEyePos.z, 1.0f);
-    XMVECTOR target = XMVectorZero();
-    XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMVECTOR target = XMLoadFloat3(&mCameraTarget);
+    XMVECTOR eye = XMVectorAdd(target, XMVectorSet(
+        mRadius * sinPhi * cosTheta,
+        mRadius * cosPhi,
+        mRadius * sinPhi * sinTheta,
+        0.0f));
 
-    XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
+    XMVECTOR forward = XMVectorSubtract(target, eye);
+    forward = XMVectorSetY(forward, 0.0f);
+    const float forwardLenSq = XMVectorGetX(XMVector3LengthSq(forward));
+    if (forwardLenSq > 1e-6f)
+        forward = XMVector3Normalize(forward);
+    else
+        forward = XMVectorSet(sinf(mTheta), 0.0f, cosf(mTheta), 0.0f);
+
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(forward, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)));
+    const float move = mCameraMoveSpeed * gt.DeltaTime();
+
+    if ((GetAsyncKeyState('W') & 0x8000) != 0)
+        target = XMVectorAdd(target, XMVectorScale(forward, move));
+    if ((GetAsyncKeyState('S') & 0x8000) != 0)
+        target = XMVectorSubtract(target, XMVectorScale(forward, move));
+    if ((GetAsyncKeyState('A') & 0x8000) != 0)
+        target = XMVectorSubtract(target, XMVectorScale(right, move));
+    if ((GetAsyncKeyState('D') & 0x8000) != 0)
+        target = XMVectorAdd(target, XMVectorScale(right, move));
+    if ((GetAsyncKeyState('E') & 0x8000) != 0)
+        target = XMVectorAdd(target, XMVectorSet(0.0f, move, 0.0f, 0.0f));
+    if ((GetAsyncKeyState('Q') & 0x8000) != 0)
+        target = XMVectorSubtract(target, XMVectorSet(0.0f, move, 0.0f, 0.0f));
+
+    XMStoreFloat3(&mCameraTarget, target);
+    eye = XMVectorAdd(target, XMVectorSet(
+        mRadius * sinPhi * cosTheta,
+        mRadius * cosPhi,
+        mRadius * sinPhi * sinTheta,
+        0.0f));
+    XMStoreFloat3(&mEyePos, eye);
+
+    const XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    XMMATRIX view = XMMatrixLookAtLH(eye, target, up);
     XMStoreFloat4x4(&mView, view);
 }
 
@@ -2706,6 +3986,7 @@ void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
             matConstants.DiffuseAlbedo = mat->DiffuseAlbedo;
             matConstants.FresnelR0 = mat->FresnelR0;
             matConstants.Roughness = mat->Roughness;
+            matConstants.Metallic = mat->Metallic;
             XMStoreFloat4x4(&matConstants.MatTransform, XMMatrixTranspose(matTransform));
             matConstants.TessellationParams = mat->TessellationParams;
             matConstants.ChessboardParams = mat->ChessboardParams;
@@ -2736,7 +4017,7 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.FarZ = 1000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
-    mMainPassCB.AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
+    mMainPassCB.AmbientLight = { 0.32f, 0.32f, 0.42f, 1.0f };
     mMainPassCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
     mMainPassCB.Lights[0].Strength = { 0.6f, 0.6f, 0.6f };
     mMainPassCB.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };
@@ -2783,8 +4064,8 @@ void CrateApp::UpdatePostProcessCB()
 void CrateApp::UpdateDeferredLightCB()
 {
     XMVECTOR eyePos = XMLoadFloat3(&mEyePos);
-    XMVECTOR lookAt = XMVectorZero();
-    XMVECTOR viewDir = XMVector3Normalize(lookAt - eyePos);
+    XMVECTOR lookAt = XMLoadFloat3(&mCameraTarget);
+    XMVECTOR viewDir = XMVector3Normalize(XMVectorSubtract(lookAt, eyePos));
 
     mSpotLights[1].Position = mEyePos;
     XMStoreFloat3(&mSpotLights[1].Direction, viewDir);
@@ -2795,10 +4076,20 @@ void CrateApp::UpdateDeferredLightCB()
         if (mFallingActive[i])
             ++activePointLights;
     }
-    mActivePointLights = (std::min)(activePointLights, kMaxPointLightsForShading);
+    UINT maxPointLights = kMaxPointLightsForShading;
+    if (mRadius > 45.0f)
+        maxPointLights = 8u;
+    else if (mRadius > 35.0f)
+        maxPointLights = 24u;
+    else if (mRadius > 25.0f)
+        maxPointLights = 64u;
+
+    mActivePointLights = (std::min)(activePointLights, maxPointLights);
 
     DeferredLightParams params = {};
     params.ActivePointLightCount = mActivePointLights;
+    params.EnableIbl = (mIblTexturesLoaded && mEnableIbl) ? 1.0f : 0.0f;
+    params.IblMaxReflectionLod = mIblMaxReflectionLod;
     mCurrFrameResource->DeferredLightParamsCB->CopyData(0, params);
 
     UINT dst = 0;
@@ -2864,7 +4155,7 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
         float dy = 0.05f * static_cast<float>(y - mLastMousePos.y);
 
         mRadius += dx - dy;
-        mRadius = MathHelper::Clamp(mRadius, 5.0f, 150.0f);
+        mRadius = MathHelper::Clamp(mRadius, 5.0f, 85.0f);
     }
 
     mLastMousePos.x = x;

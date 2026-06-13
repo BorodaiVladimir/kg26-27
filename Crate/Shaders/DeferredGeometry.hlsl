@@ -3,6 +3,8 @@
 Texture2D gDiffuseMap : register(t0);
 Texture2D gHeightNormalMap : register(t1);
 Texture2D gDiffuseMapB : register(t2);
+Texture2D gMetallicMap : register(t3);
+Texture2D gRoughnessMap : register(t4);
 SamplerState gsamLinear : register(s0);
 
 cbuffer cbPerObject : register(b0)
@@ -37,6 +39,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;
@@ -116,7 +120,10 @@ HsPatch HSConst(InputPatch<VsOut, 3> p, uint patchId : SV_PrimitiveID)
         return o;
     }
 
-    const float tf = (gTessParams.w > 0.5f) ? 4.0f : 1.0f;
+    float3 c = (p[0].PosW + p[1].PosW + p[2].PosW) / 3.0f;
+    float dist = distance(c, gEyePosW);
+    float t = saturate(dist / max(gTessParams.z, 1.0f));
+    float tf = lerp(7.0f, 1.0f, t);
     o.Edge[0] = tf;
     o.Edge[1] = tf;
     o.Edge[2] = tf;
@@ -185,7 +192,15 @@ GBufferOut PS(DsOut pin)
     }
     gout.Albedo = albedo;
     gout.Normal = float4(bumped * 0.5f + 0.5f, 1.0f);
-    gout.Material = float4(gFresnelR0, saturate(gRoughness));
+    float metallic = saturate(gMetallic);
+    float roughness = saturate(gRoughness);
+    float ao = 1.0f;
+    if (gChessboard.w >= 1.0f)
+    {
+        metallic = gMetallicMap.Sample(gsamLinear, pin.TexC).r;
+        roughness = gRoughnessMap.Sample(gsamLinear, pin.TexC).r;
+    }
+    gout.Material = float4(metallic, roughness, ao, 1.0f);
     gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

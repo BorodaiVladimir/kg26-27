@@ -30,6 +30,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;
@@ -96,7 +98,10 @@ HsPatch HSConst(InputPatch<VsOut, 3> p, uint patchId : SV_PrimitiveID)
         return o;
     }
 
-    const float tf = (gTessParams.w > 0.5f) ? 4.0f : 1.0f;
+    float3 c = (p[0].PosW + p[1].PosW + p[2].PosW) / 3.0f;
+    float dist = distance(c, gEyePosW);
+    float t = saturate(dist / max(gTessParams.z, 1.0f));
+    float tf = lerp(2.0f, 1.0f, t);
     o.Edge[0] = tf;
     o.Edge[1] = tf;
     o.Edge[2] = tf;

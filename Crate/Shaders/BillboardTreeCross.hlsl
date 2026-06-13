@@ -48,6 +48,8 @@ cbuffer cbMaterial : register(b2)
     float4 gDiffuseAlbedo;
     float3 gFresnelR0;
     float gRoughness;
+    float gMetallic;
+    float3 gMatPad;
     float4x4 gMatTransform;
     float4 gTessParams;
     float4 gChessboard;
@@ -118,7 +120,7 @@ GBufferOut PS(VsOut pin)
     float3 n = normalize(pin.NormalW);
     gout.Albedo = float4(albedo.rgb, 1.0f);
     gout.Normal = float4(n * 0.5f + 0.5f, 1.0f);
-    gout.Material = float4(gFresnelR0, saturate(gRoughness));
+    gout.Material = float4(saturate(gMetallic), saturate(gRoughness), 1.0f, 1.0f);
     gout.Position = float4(pin.PosW, pin.PosV.z);
     return gout;
 }

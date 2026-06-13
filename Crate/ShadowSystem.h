@@ -3,6 +3,8 @@
 #include "../Common/d3dUtil.h"
 #include "../Common/UploadBuffer.h"
 
+static const UINT kShadowFrameResourceCount = 3;
+
 struct ShadowPassConstants
 {
     DirectX::XMFLOAT4X4 LightViewProj = MathHelper::Identity4x4();
@@ -52,9 +54,11 @@ public:
         float splitLambda);
 
     void BeginPass(ID3D12GraphicsCommandList* cmdList, D3D12_GPU_VIRTUAL_ADDRESS passCbAddress);
-    void BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex);
+    void BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascadeIndex, UINT frameIndex);
     void EndPass(ID3D12GraphicsCommandList* cmdList);
     void PrepareForLighting(ID3D12GraphicsCommandList* cmdList);
+
+    void MarkShadowMapShaderResource();
 
     ID3D12RootSignature* GetRootSignature() const { return mRootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return mShadowPSO.Get(); }
@@ -63,8 +67,8 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE GetShadowMapSrvCpu() const;
     ID3D12Resource* GetShadowMapResource() const { return mShadowMap.Get(); }
 
-    void UpdateLightingConstants(DirectX::FXMVECTOR lightDirectionW);
-    D3D12_GPU_VIRTUAL_ADDRESS GetLightingConstantBufferAddress() const;
+    void UpdateLightingConstants(DirectX::FXMVECTOR lightDirectionW, UINT frameIndex);
+    D3D12_GPU_VIRTUAL_ADDRESS GetLightingConstantBufferAddress(UINT frameIndex) const;
 
 private:
     enum class ShadowMapState
@@ -113,6 +117,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mDsvHeap;
-    UploadBuffer<ShadowPassConstants>* mPassCB;
-    UploadBuffer<ShadowLightingConstants>* mLightingCB;
+    UploadBuffer<ShadowPassConstants>* mPassCB[kShadowFrameResourceCount] = {};
+    UploadBuffer<ShadowLightingConstants>* mLightingCB[kShadowFrameResourceCount] = {};
 };

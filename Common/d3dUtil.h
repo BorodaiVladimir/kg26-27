@@ -167,6 +167,8 @@ struct MaterialConstants
     DirectX::XMFLOAT4 DiffuseAlbedo = { 1.0f, 1.0f, 1.0f, 1.0f };
     DirectX::XMFLOAT3 FresnelR0 = { 0.01f, 0.01f, 0.01f };
     float Roughness = 0.25f;
+    float Metallic = 0.0f;
+    DirectX::XMFLOAT3 MatPad = { 0.0f, 0.0f, 0.0f };
     DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
     DirectX::XMFLOAT4 TessellationParams = { 0.0f, 0.0f, 80.0f, 0.0f }; // x=dispScale, y=dispBias, z=maxDist, w=enable
     DirectX::XMFLOAT4 ChessboardParams = { 0.0f, 0.0f, 0.0f, 0.0f }; // x,y=tiles per UV, z=1 dual-tex, w pad
@@ -179,10 +181,13 @@ struct Material
     int DiffuseSrvHeapIndex = -1;
     int DiffuseSrvHeapIndex2 = -1;
     int NormalSrvHeapIndex = -1;
+    int MetallicSrvHeapIndex = -1;
+    int RoughnessSrvHeapIndex = -1;
     int NumFramesDirty = gNumFrameResources;
     DirectX::XMFLOAT4 DiffuseAlbedo = { 1.0f, 1.0f, 1.0f, 1.0f };
     DirectX::XMFLOAT3 FresnelR0 = { 0.01f, 0.01f, 0.01f };
     float Roughness = 0.25f;
+    float Metallic = 0.0f;
     DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
     DirectX::XMFLOAT4 TessellationParams = { 0.0f, 0.0f, 80.0f, 0.0f };
     DirectX::XMFLOAT4 ChessboardParams = { 0.0f, 0.0f, 0.0f, 0.0f };
