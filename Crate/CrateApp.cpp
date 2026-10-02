@@ -8,6 +8,7 @@
 #include "RenderingSystem.h"
 #include "ShadowSystem.h"
 #include "KdTree.h"
+#include "TerrainQuadtree.h"
 #include "ParticleSystem.h"
 #include <DirectXCollision.h>
 #include <memory>
@@ -422,6 +423,7 @@ struct RenderItem
     bool AnimateTexture = false;
     XMFLOAT2 AnimationSpeed = { 0.0f, 0.0f };
     bool IsStressObject = false;
+    bool IsTerrainTile = false;
 };
 
 struct SubmeshData
@@ -499,6 +501,10 @@ private:
     void DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const std::vector<RenderItem*>& ritems);
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
+    void LoadTerrainHeightMap();
+    void CreateTerrainPatchGeometry();
+    void BuildTerrainTilePool(int& objIndex);
+    void UpdateTerrainVisibility();
     void CreateBillboardForest();
     void UpdateForestLod(UINT frameIndex);
     void DrawBillboardForest(ID3D12GraphicsCommandList* cmdList);
@@ -509,7 +515,7 @@ private:
 
     std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
-    bool LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex);
+    bool LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex, bool forceSrgb = true);
 
 private:
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
@@ -568,6 +574,22 @@ private:
     bool mHasPbrModel = false;
     bool mHasPbrCerberus = false;
     bool mHasPbrWoodRoot = false;
+    bool mHasTerrain = false;
+    int mTerrainHeightSrvIndex = -1;
+    static constexpr float kTerrainWorldSize = 2048.0f;
+    static constexpr float kTerrainHeightScale = 120.0f;
+    static constexpr int kTerrainMaxQuadDepth = 4;
+    static constexpr float kTerrainLodDistanceFactor = 2.75f;
+    static constexpr UINT kTerrainPatchGridVerts = 33;
+    static constexpr UINT kTerrainMaxDrawTiles = 256;
+    static constexpr float kTerrainSkirtDepth = 20.0f;
+    TerrainQuadtree mTerrainQuadtree;
+    std::vector<float> mTerrainHeightSamples;
+    int mTerrainHeightWidth = 0;
+    int mTerrainHeightHeight = 0;
+    std::vector<RenderItem*> mTerrainVisibleRitems;
+    size_t mTerrainTilesDrawn = 0;
+    size_t mTerrainTilesLeafCount = 0;
     XMFLOAT3 mPbrWorldCenter = { 0.0f, 0.0f, 0.0f };
     bool mIblTexturesLoaded = false;
     bool mEnableIbl = true;
@@ -677,8 +699,9 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 {
     mMainWndCaption = L"Crate DX12";
     mTheta = 1.3f * XM_PI;
-    mPhi = 0.4f * XM_PI;
-    mRadius = 8.0f;
+    mPhi = 0.55f * XM_PI;
+    mRadius = 380.0f;
+    mCameraTarget = { 0.0f, 40.0f, 0.0f };
 
     // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
     mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
@@ -720,7 +743,10 @@ std::wstring CrateApp::GetFrameStatsExtra() const
     wchar_t buf[320];
     swprintf_s(
         buf,
-        L"   stress draw: %zu / %zu   pbr wood:%s   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s F8 ibl:%s F9 ndf:%s",
+        L"   terrain:%s tiles:%zu/%zu   stress draw: %zu / %zu   pbr wood:%s   F4 cull:%s F5 kd:%s   F6 edge:%s F7 vcr:%s F8 ibl:%s F9 ndf:%s",
+        mHasTerrain ? L"on" : L"off",
+        mTerrainTilesDrawn,
+        mTerrainTilesLeafCount,
         mStressVisibleRitems.size(),
         mStressRitems.size(),
         mHasPbrWoodRoot ? L"on" : L"off",
@@ -745,17 +771,31 @@ bool CrateApp::Initialize()
     LoadTextures();
     LoadIblTextures();
     BuildDescriptorHeaps();
+    LoadTerrainHeightMap();
     LoadOBJModels();
     LoadPbrModel();
     LoadSlendermanModel();
     LoadTreeLodMesh();
     LoadBillboardTreeTexture();
     CreateWaterPlaneGeometry();
+    if (mHasTerrain)
+    {
+        CreateTerrainPatchGeometry();
+        mTerrainQuadtree.Build(kTerrainWorldSize, kTerrainMaxQuadDepth);
+        mTerrainTilesLeafCount = (size_t)mTerrainQuadtree.MaxLeafCount();
+    }
     CreateBoxGeometry();
     CreateBillboardForest();
     BuildMaterials();
     BuildRenderItems();
     BuildFrameResources();
+
+    if (mHasTerrain)
+    {
+        const float farZ = 8000.0f;
+        XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, farZ);
+        XMStoreFloat4x4(&mProj, P);
+    }
 
     mRenderingSystem = std::make_unique<RenderingSystem>();
     mRenderingSystem->Initialize(
@@ -799,6 +839,13 @@ bool CrateApp::Initialize()
 
     FlushCommandQueue();
 
+    if (mHasTerrain)
+    {
+        GameTimer gt;
+        UpdateCamera(gt);
+        UpdateTerrainVisibility();
+    }
+
     return true;
 }
 
@@ -813,7 +860,8 @@ void CrateApp::OnResize()
         mRenderingSystem->OnResize(mClientWidth, mClientHeight);
     }
 
-    XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
+    const float farZ = mHasTerrain ? 8000.0f : 1000.0f;
+    XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, AspectRatio(), 1.0f, farZ);
     XMStoreFloat4x4(&mProj, P);
 }
 
@@ -833,6 +881,7 @@ void CrateApp::Update(const GameTimer& gt)
     }
 
     AnimateMaterials(gt);
+    UpdateTerrainVisibility();
     UpdateObjectCBs(gt);
     UpdateMaterialCBs(gt);
     UpdateMainPassCB(gt);
@@ -1078,6 +1127,7 @@ void CrateApp::Draw(const GameTimer& gt)
             for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
             {
                 mShadowSystem->BeginCascade(mCommandList.Get(), c, mCurrFrameResourceIndex);
+                DrawRenderItemsShadow(mCommandList.Get(), mTerrainVisibleRitems);
                 DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
             }
             mShadowSystem->EndPass(mCommandList.Get());
@@ -1099,6 +1149,7 @@ void CrateApp::Draw(const GameTimer& gt)
         checkerTex,
         mGeometryWireframe);
 
+    DrawRenderItems(mCommandList.Get(), mTerrainVisibleRitems);
     DrawRenderItems(mCommandList.Get(), mSponzaOpaqueRitems);
     DrawRenderItems(mCommandList.Get(), mStressVisibleRitems);
     DrawBillboardForest(mCommandList.Get());
@@ -1379,7 +1430,302 @@ void CrateApp::CreateWaterPlaneGeometry()
     OutputDebugStringA("Water plane geometry created\n");
 }
 
-bool CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex)
+void CrateApp::LoadTerrainHeightMap()
+{
+    mHasTerrain = false;
+    mTerrainHeightSrvIndex = -1;
+    mTerrainHeightSamples.clear();
+    mTerrainHeightWidth = 0;
+    mTerrainHeightHeight = 0;
+
+    const char* tryPaths[] = {
+        "../Models/Terrain/terrain_height.png",
+        "Models/Terrain/terrain_height.png",
+        "../../Models/Terrain/terrain_height.png",
+        "../Models/Terrain/terrain_height.tga",
+    };
+
+    for (const char* path : tryPaths)
+    {
+        const std::string resolved = ResolveMediaPath(path);
+        if (!FileExistsA_Local(resolved.c_str()))
+            continue;
+
+        if (!LoadModelTexture(path, "terrainHeight", 2, false))
+            continue;
+
+        mHasTerrain = true;
+        mTerrainHeightSrvIndex = 2;
+
+        std::wstring wpath(resolved.begin(), resolved.end());
+        ScratchImage image;
+        TexMetadata metadata;
+        HRESULT hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &metadata, image);
+        if (FAILED(hr))
+            hr = LoadFromTGAFile(wpath.c_str(), &metadata, image);
+
+        if (SUCCEEDED(hr))
+        {
+            ScratchImage rgba;
+            const Image* img = image.GetImage(0, 0, 0);
+            if (img && metadata.format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+                metadata.format != DXGI_FORMAT_B8G8R8A8_UNORM)
+            {
+                if (SUCCEEDED(Convert(image.GetImages(), image.GetImageCount(), metadata,
+                    DXGI_FORMAT_R8G8B8A8_UNORM, TEX_FILTER_DEFAULT, 0.0f, rgba)))
+                {
+                    metadata = rgba.GetMetadata();
+                    img = rgba.GetImage(0, 0, 0);
+                }
+            }
+
+            if (img && img->width > 0 && img->height > 0)
+            {
+                mTerrainHeightWidth = (int)img->width;
+                mTerrainHeightHeight = (int)img->height;
+                mTerrainHeightSamples.resize((size_t)mTerrainHeightWidth * (size_t)mTerrainHeightHeight);
+
+                const size_t bpp = DirectX::BitsPerPixel(metadata.format) / 8;
+                for (int y = 0; y < mTerrainHeightHeight; ++y)
+                {
+                    for (int x = 0; x < mTerrainHeightWidth; ++x)
+                    {
+                        const uint8_t* px = img->pixels + (size_t)y * img->rowPitch + (size_t)x * bpp;
+                        mTerrainHeightSamples[(size_t)y * (size_t)mTerrainHeightWidth + (size_t)x] = px[0] / 255.0f;
+                    }
+                }
+            }
+        }
+        else
+        {
+            OutputDebugStringA("Terrain: CPU height samples skipped (WIC read failed), GPU map still used\n");
+        }
+
+        char msg[160];
+        sprintf_s(
+            msg,
+            "Terrain height loaded: GPU SRV 2, CPU %dx%d, path OK\n",
+            mTerrainHeightWidth,
+            mTerrainHeightHeight);
+        OutputDebugStringA(msg);
+        return;
+    }
+
+    OutputDebugStringA("Terrain: ../Models/Terrain/terrain_height.png not found — skipping.\n");
+}
+
+void CrateApp::CreateTerrainPatchGeometry()
+{
+    GeometryGenerator geoGen;
+    GeometryGenerator::MeshData grid = geoGen.CreateGrid(
+        1.0f,
+        1.0f,
+        kTerrainPatchGridVerts,
+        kTerrainPatchGridVerts);
+
+    std::vector<Vertex> vertices(grid.Vertices.size());
+    for (size_t i = 0; i < grid.Vertices.size(); ++i)
+    {
+        vertices[i].Pos = grid.Vertices[i].Position;
+        vertices[i].Normal = grid.Vertices[i].Normal;
+        vertices[i].TexC = grid.Vertices[i].TexC;
+    }
+
+    std::vector<std::uint32_t> indices = grid.Indices32;
+
+    // Skirts hide cracks between neighbouring tiles of different LOD.
+    // World Y scale of a tile is 1, so local Y is the skirt depth in metres.
+    const UINT n = kTerrainPatchGridVerts;
+    auto addSkirtEdge = [&](auto gridIndex)
+    {
+        for (UINT k = 0; k + 1 < n; ++k)
+        {
+            const std::uint32_t a = gridIndex(k);
+            const std::uint32_t b = gridIndex(k + 1);
+            const std::uint32_t a2 = (std::uint32_t)vertices.size();
+            Vertex va = vertices[a];
+            Vertex vb = vertices[b];
+            va.Pos.y = -kTerrainSkirtDepth;
+            vb.Pos.y = -kTerrainSkirtDepth;
+            vertices.push_back(va);
+            vertices.push_back(vb);
+            const std::uint32_t b2 = a2 + 1;
+
+            indices.insert(indices.end(), { a, b, a2, a2, b, b2 });
+            indices.insert(indices.end(), { a, a2, b, a2, b2, b });
+        }
+    };
+    addSkirtEdge([&](UINT k) { return (std::uint32_t)k; });
+    addSkirtEdge([&](UINT k) { return (std::uint32_t)((n - 1) * n + k); });
+    addSkirtEdge([&](UINT k) { return (std::uint32_t)(k * n); });
+    addSkirtEdge([&](UINT k) { return (std::uint32_t)(k * n + n - 1); });
+
+    auto geo = std::make_unique<MeshGeometry>();
+    geo->Name = "TerrainPatch";
+
+    const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+    const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint32_t);
+
+    ThrowIfFailed(D3DCreateBlob(vbByteSize, &geo->VertexBufferCPU));
+    CopyMemory(geo->VertexBufferCPU->GetBufferPointer(), vertices.data(), vbByteSize);
+
+    ThrowIfFailed(D3DCreateBlob(ibByteSize, &geo->IndexBufferCPU));
+    CopyMemory(geo->IndexBufferCPU->GetBufferPointer(), indices.data(), ibByteSize);
+
+    geo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), vertices.data(), vbByteSize, geo->VertexBufferUploader);
+
+    geo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(md3dDevice.Get(),
+        mCommandList.Get(), indices.data(), ibByteSize, geo->IndexBufferUploader);
+
+    geo->VertexByteStride = sizeof(Vertex);
+    geo->VertexBufferByteSize = vbByteSize;
+    geo->IndexFormat = DXGI_FORMAT_R32_UINT;
+    geo->IndexBufferByteSize = ibByteSize;
+
+    SubmeshGeometry submesh;
+    submesh.IndexCount = (UINT)indices.size();
+    submesh.StartIndexLocation = 0;
+    submesh.BaseVertexLocation = 0;
+    geo->DrawArgs["terrainPatch"] = submesh;
+
+    mGeometries[geo->Name] = std::move(geo);
+
+    char msg[160];
+    sprintf_s(
+        msg,
+        "Terrain patch mesh: %u verts, world %.0f m, quadtree depth %d\n",
+        kTerrainPatchGridVerts,
+        kTerrainWorldSize,
+        kTerrainMaxQuadDepth);
+    OutputDebugStringA(msg);
+}
+
+void CrateApp::BuildTerrainTilePool(int& objIndex)
+{
+    auto patchGeo = mGeometries["TerrainPatch"].get();
+    auto matIt = mMaterials.find("terrain");
+    if (!patchGeo || matIt == mMaterials.end())
+        return;
+
+    auto drawArg = patchGeo->DrawArgs.find("terrainPatch");
+    if (drawArg == patchGeo->DrawArgs.end())
+        return;
+
+    for (UINT i = 0; i < kTerrainMaxDrawTiles; ++i)
+    {
+        auto ri = std::make_unique<RenderItem>();
+        ri->ObjCBIndex = objIndex++;
+        ri->Mat = matIt->second.get();
+        ri->Geo = patchGeo;
+        ri->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+        ri->IndexCount = drawArg->second.IndexCount;
+        ri->StartIndexLocation = drawArg->second.StartIndexLocation;
+        ri->BaseVertexLocation = drawArg->second.BaseVertexLocation;
+        ri->IsTerrainTile = true;
+        ri->AnimateTexture = false;
+        XMStoreFloat4x4(&ri->World, XMMatrixIdentity());
+        mAllRitems.push_back(std::move(ri));
+    }
+
+    char msg[96];
+    sprintf_s(msg, "Terrain tile pool: %u render items\n", kTerrainMaxDrawTiles);
+    OutputDebugStringA(msg);
+}
+
+void CrateApp::UpdateTerrainVisibility()
+{
+    mTerrainVisibleRitems.clear();
+    mTerrainTilesDrawn = 0;
+    if (!mHasTerrain)
+        return;
+
+    std::vector<TerrainTileSelection> tiles;
+    tiles.reserve(kTerrainMaxDrawTiles);
+
+    const XMMATRIX view = XMLoadFloat4x4(&mView);
+    const XMMATRIX proj = XMLoadFloat4x4(&mProj);
+    BoundingFrustum frustumProj;
+    BoundingFrustum::CreateFromMatrix(frustumProj, proj);
+
+    const float minTileSize = kTerrainWorldSize / (float)(1 << kTerrainMaxQuadDepth);
+    mTerrainQuadtree.SelectTiles(
+        mEyePos,
+        kTerrainLodDistanceFactor,
+        minTileSize,
+        mFrustumCullEnabled,
+        frustumProj,
+        view,
+        mTerrainHeightSamples.empty() ? nullptr : mTerrainHeightSamples.data(),
+        mTerrainHeightWidth,
+        mTerrainHeightHeight,
+        kTerrainHeightScale,
+        tiles);
+
+    if (tiles.empty())
+    {
+        TerrainTileSelection root;
+        root.MinX = -kTerrainWorldSize * 0.5f;
+        root.MinZ = -kTerrainWorldSize * 0.5f;
+        root.Size = kTerrainWorldSize;
+        root.UvMinX = 0.0f;
+        root.UvMinZ = 0.0f;
+        root.UvSize = 1.0f;
+        root.Bounds = TerrainQuadtree::ComputeTileBounds(
+            root.MinX,
+            root.MinZ,
+            root.Size,
+            root.UvMinX,
+            root.UvMinZ,
+            root.UvSize,
+            mTerrainHeightSamples.empty() ? nullptr : mTerrainHeightSamples.data(),
+            mTerrainHeightWidth,
+            mTerrainHeightHeight,
+            kTerrainHeightScale);
+        tiles.push_back(root);
+    }
+
+    mTerrainTilesDrawn = tiles.size();
+
+    std::vector<RenderItem*> pool;
+    pool.reserve(mAllRitems.size());
+    for (auto& e : mAllRitems)
+    {
+        if (e && e->IsTerrainTile)
+            pool.push_back(e.get());
+    }
+
+    const size_t drawCount = (std::min)(tiles.size(), pool.size());
+    mTerrainVisibleRitems.reserve(drawCount);
+
+    for (size_t i = 0; i < drawCount; ++i)
+    {
+        const TerrainTileSelection& tile = tiles[i];
+        RenderItem* ri = pool[i];
+
+        const float half = tile.Size * 0.5f;
+        const XMMATRIX world =
+            XMMatrixScaling(tile.Size, 1.0f, tile.Size) *
+            XMMatrixTranslation(tile.MinX + half, 0.0f, tile.MinZ + half);
+
+        ri->TextureScaleU = tile.UvSize;
+        ri->TextureScaleV = tile.UvSize;
+        ri->TextureOffsetU = tile.UvMinX;
+        ri->TextureOffsetV = tile.UvMinZ;
+
+        XMMATRIX texScale = XMMatrixScaling(tile.UvSize, tile.UvSize, 1.0f);
+        XMMATRIX texTranslation = XMMatrixTranslation(tile.UvMinX, tile.UvMinZ, 0.0f);
+        XMMATRIX texTransform = texScale * texTranslation;
+        XMStoreFloat4x4(&ri->World, world);
+        XMStoreFloat4x4(&ri->TexTransform, texTransform);
+        XMStoreFloat4x4(&ri->TexTransformDisp, texTransform);
+        ri->NumFramesDirty = gNumFrameResources;
+
+        mTerrainVisibleRitems.push_back(ri);
+    }
+}
+
+bool CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex, bool forceSrgb)
 {
     const std::string resolvedPath = ResolveMediaPath(texturePath);
 
@@ -1403,9 +1749,11 @@ bool CrateApp::LoadModelTexture(const std::string& texturePath, const std::strin
     hr = LoadFromTGAFile(wTexturePath.c_str(), &metadata, image);
     if (FAILED(hr))
     {
-        hr = LoadFromWICFile(wTexturePath.c_str(), WIC_FLAGS_FORCE_SRGB, &metadata, image);
+        if (forceSrgb)
+            hr = LoadFromWICFile(wTexturePath.c_str(), WIC_FLAGS_FORCE_SRGB, &metadata, image);
         if (FAILED(hr))
-            hr = LoadFromWICFile(wTexturePath.c_str(), WIC_FLAGS_NONE, &metadata, image);
+            hr = LoadFromWICFile(
+                wTexturePath.c_str(), forceSrgb ? WIC_FLAGS_NONE : WIC_FLAGS_IGNORE_SRGB, &metadata, image);
     }
     if (FAILED(hr))
         hr = LoadFromDDSFile(wTexturePath.c_str(), DDS_FLAGS_NONE, &metadata, image);
@@ -1802,7 +2150,7 @@ void CrateApp::LoadOBJModels()
         }
     }
 
-    int nextHeapIndex = 2;
+    int nextHeapIndex = mHasTerrain ? 3 : 2;
     for (const auto& pair : materialToTexture)
     {
         const std::string& matName = pair.first;
@@ -2029,7 +2377,7 @@ bool CrateApp::ImportPbrFbxModel(
     if (slash != std::string::npos)
         baseDir = baseDir.substr(0, slash + 1);
 
-    int nextHeapIndex = 2;
+    int nextHeapIndex = mHasTerrain ? 3 : 2;
     for (const auto& cacheEntry : mTextureCache)
         nextHeapIndex = (std::max)(nextHeapIndex, cacheEntry.second + 1);
 
@@ -3128,6 +3476,28 @@ void CrateApp::BuildMaterials()
     water->ChessboardParams = XMFLOAT4(1.2f, 1.2f, 0.0f, 0.0f);
     mMaterials["water"] = std::move(water);
 
+    if (mHasTerrain)
+    {
+        auto terrain = std::make_unique<Material>();
+        terrain->Name = "terrain";
+        terrain->MatCBIndex = (int)mMaterials.size();
+        terrain->DiffuseSrvHeapIndex = 1;
+        terrain->DiffuseSrvHeapIndex2 = -1;
+        terrain->NormalSrvHeapIndex = mTerrainHeightSrvIndex;
+        terrain->DiffuseAlbedo = XMFLOAT4(0.42f, 0.48f, 0.32f, 1.0f);
+        terrain->FresnelR0 = XMFLOAT3(0.04f, 0.04f, 0.04f);
+        terrain->Roughness = 0.88f;
+        terrain->Metallic = 0.0f;
+        terrain->MatPad = XMFLOAT3(
+            (float)(mTerrainHeightWidth > 0 ? mTerrainHeightWidth : 1025),
+            (float)(mTerrainHeightHeight > 0 ? mTerrainHeightHeight : 1025),
+            kTerrainWorldSize);
+        terrain->TessellationParams = XMFLOAT4(kTerrainHeightScale, 0.0f, 800.0f, 0.0f);
+        terrain->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+        mMaterials["terrain"] = std::move(terrain);
+        OutputDebugStringA("Material 'terrain' created\n");
+    }
+
     const UINT treeSrv = mBillboardTreeSrvHeapIndex != 0 ? mBillboardTreeSrvHeapIndex : mFallbackTreeSrvHeapIndex;
 
     auto billboardTree = std::make_unique<Material>();
@@ -3340,6 +3710,9 @@ void CrateApp::BuildRenderItems()
 
     BuildStressTestObjects(objIndex);
 
+    if (mHasTerrain)
+        BuildTerrainTilePool(objIndex);
+
     {
         auto waterGeo = mGeometries["WaterPlane"].get();
         auto waterMatIt = mMaterials.find("water");
@@ -3377,6 +3750,8 @@ void CrateApp::BuildRenderItems()
             continue;
         if (e->Mat->Name == "water")
             mWaterRitems.push_back(e.get());
+        else if (e->IsTerrainTile)
+            continue;
         else if (e->IsStressObject)
             mStressRitems.push_back(e.get());
         else
@@ -4010,6 +4385,7 @@ void CrateApp::UpdateMaterialCBs(const GameTimer& gt)
             XMStoreFloat4x4(&matConstants.MatTransform, XMMatrixTranspose(matTransform));
             matConstants.TessellationParams = mat->TessellationParams;
             matConstants.ChessboardParams = mat->ChessboardParams;
+            matConstants.MatPad = mat->MatPad;
 
             currMaterialCB->CopyData(mat->MatCBIndex, matConstants);
             mat->NumFramesDirty--;
@@ -4034,7 +4410,7 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.RenderTargetSize = XMFLOAT2((float)mClientWidth, (float)mClientHeight);
     mMainPassCB.InvRenderTargetSize = XMFLOAT2(1.0f / mClientWidth, 1.0f / mClientHeight);
     mMainPassCB.NearZ = 1.0f;
-    mMainPassCB.FarZ = 1000.0f;
+    mMainPassCB.FarZ = mHasTerrain ? 8000.0f : 1000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
     mMainPassCB.AmbientLight = { 0.32f, 0.32f, 0.42f, 1.0f };
@@ -4176,7 +4552,7 @@ void CrateApp::OnMouseMove(WPARAM btnState, int x, int y)
         float dy = 0.05f * static_cast<float>(y - mLastMousePos.y);
 
         mRadius += dx - dy;
-        mRadius = MathHelper::Clamp(mRadius, 5.0f, 85.0f);
+        mRadius = MathHelper::Clamp(mRadius, 15.0f, mHasTerrain ? 1400.0f : 85.0f);
     }
 
     mLastMousePos.x = x;

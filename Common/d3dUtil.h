@@ -188,6 +188,7 @@ struct Material
     DirectX::XMFLOAT3 FresnelR0 = { 0.01f, 0.01f, 0.01f };
     float Roughness = 0.25f;
     float Metallic = 0.0f;
+    DirectX::XMFLOAT3 MatPad = { 0.0f, 0.0f, 0.0f };
     DirectX::XMFLOAT4X4 MatTransform = MathHelper::Identity4x4();
     DirectX::XMFLOAT4 TessellationParams = { 0.0f, 0.0f, 80.0f, 0.0f };
     DirectX::XMFLOAT4 ChessboardParams = { 0.0f, 0.0f, 0.0f, 0.0f };

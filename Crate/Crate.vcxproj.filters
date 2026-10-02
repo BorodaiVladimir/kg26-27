@@ -45,6 +45,9 @@
     <ClCompile Include="RenderingSystem.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="TerrainQuadtree.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KdTree.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -90,6 +93,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RenderingSystem.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TerrainQuadtree.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="KdTree.h">

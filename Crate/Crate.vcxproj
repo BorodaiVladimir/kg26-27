@@ -161,6 +161,7 @@
     <ClCompile Include="FrameResource.cpp" />
     <ClCompile Include="GBuffer.cpp" />
     <ClCompile Include="KdTree.cpp" />
+    <ClCompile Include="TerrainQuadtree.cpp" />
     <ClCompile Include="ParticleSystem.cpp" />
     <ClCompile Include="RenderingSystem.cpp" />
     <ClCompile Include="ShadowSystem.cpp" />
@@ -178,6 +179,7 @@
     <ClInclude Include="GBuffer.h" />
     <ClInclude Include="Lights.h" />
     <ClInclude Include="KdTree.h" />
+    <ClInclude Include="TerrainQuadtree.h" />
     <ClInclude Include="ParticleSystem.h" />
     <ClInclude Include="RenderingSystem.h" />
     <ClInclude Include="ShadowSystem.h" />

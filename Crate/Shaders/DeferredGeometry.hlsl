@@ -160,18 +160,31 @@ GBufferOut PS(DsOut pin)
     float3 normal = normalize(pin.NormalW);
 
     float2 uvD = pin.TexCDisp;
-    float2 texel = 1.0f / float2(2048.0f, 2048.0f);
+    float2 mapSize = (gMatPad.x > 0.5f && gMatPad.y > 0.5f) ? gMatPad.xy : float2(2048.0f, 2048.0f);
+    float2 texel = 1.0f / mapSize;
     float hL = gHeightNormalMap.Sample(gsamLinear, uvD + float2(-texel.x, 0)).r;
     float hR = gHeightNormalMap.Sample(gsamLinear, uvD + float2(texel.x, 0)).r;
     float hD = gHeightNormalMap.Sample(gsamLinear, uvD + float2(0, -texel.y)).r;
     float hU = gHeightNormalMap.Sample(gsamLinear, uvD + float2(0, texel.y)).r;
-    float bumpStrength = max(abs(gTessParams.x) * 40.0f, 1.0f);
-    float3 nTS = normalize(float3((hL - hR) * bumpStrength, (hD - hU) * bumpStrength, 1.0f));
+    float3 bumped;
+    if (gMatPad.z > 0.5f)
+    {
+        // Terrain: gMatPad.z = world size in metres; V grows toward -Z.
+        float texelWorld = gMatPad.z / mapSize.x;
+        float dhdx = (hR - hL) * gTessParams.x / (2.0f * texelWorld);
+        float dhdz = (hD - hU) * gTessParams.x / (2.0f * texelWorld);
+        bumped = normalize(float3(-dhdx, 1.0f, -dhdz));
+    }
+    else
+    {
+        float bumpStrength = max(abs(gTessParams.x) * 40.0f, 1.0f);
+        float3 nTS = normalize(float3((hL - hR) * bumpStrength, (hD - hU) * bumpStrength, 1.0f));
 
-    float3 up = abs(normal.y) < 0.95f ? float3(0, 1, 0) : float3(1, 0, 0);
-    float3 tangentW = normalize(cross(up, normal));
-    float3 bitangentW = normalize(cross(normal, tangentW));
-    float3 bumped = normalize(tangentW * nTS.x + bitangentW * nTS.y + normal * nTS.z);
+        float3 up = abs(normal.y) < 0.95f ? float3(0, 1, 0) : float3(1, 0, 0);
+        float3 tangentW = normalize(cross(up, normal));
+        float3 bitangentW = normalize(cross(normal, tangentW));
+        bumped = normalize(tangentW * nTS.x + bitangentW * nTS.y + normal * nTS.z);
+    }
 
     float4 albedo;
     if (gChessboard.z > 0.5f)
@@ -185,6 +198,19 @@ GBufferOut PS(DsOut pin)
         float4 c1 = gDiffuseMapB.Sample(gsamLinear, localUV) * gDiffuseAlbedo;
         bool useB = ((ti.x + ti.y) & 1) != 0;
         albedo = useB ? c1 : c0;
+    }
+    else if (gMatPad.z > 0.5f)
+    {
+        float hC = 0.25f * (hL + hR + hD + hU);
+        float slope = 1.0f - saturate(bumped.y);
+        float3 sand = float3(0.55f, 0.50f, 0.36f);
+        float3 grass = float3(0.20f, 0.33f, 0.12f);
+        float3 rock = float3(0.38f, 0.34f, 0.30f);
+        float3 snow = float3(0.92f, 0.93f, 0.95f);
+        float3 c = lerp(sand, grass, smoothstep(0.04f, 0.10f, hC));
+        c = lerp(c, rock, smoothstep(0.15f, 0.35f, slope));
+        c = lerp(c, snow, smoothstep(0.65f, 0.80f, hC) * (1.0f - smoothstep(0.25f, 0.45f, slope)));
+        albedo = float4(c, 1.0f);
     }
     else
     {
