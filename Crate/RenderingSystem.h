@@ -71,7 +71,15 @@ public:
     ID3D12RootSignature* GetBillboardRootSignature() const { return mBillboardRootSignature.Get(); }
     ID3D12PipelineState* GetBillboardTreePSO() const { return mBillboardTreePSO.Get(); }
     ID3D12PipelineState* GetTreeMeshInstancedPSO() const { return mTreeMeshInstancedPSO.Get(); }
+    ID3D12PipelineState* GetGeometryPSO(bool wireframe) const
+    {
+        return wireframe ? mGeometryWireframePSO.Get() : mGeometryPSO.Get();
+    }
     ID3D12PipelineState* GetGeometrySolidPSO() const { return mGeometrySolidPSO.Get(); }
+    ID3D12PipelineState* GetTerrainPSO(bool wireframe) const
+    {
+        return wireframe ? mTerrainWireframePSO.Get() : mTerrainPSO.Get();
+    }
 
 private:
     void BuildGeometryRootSignature();
@@ -119,6 +127,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometrySolidPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mGeometryWireframePSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTerrainPSO = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTerrainWireframePSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mBillboardTreePSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mTreeMeshInstancedPSO = nullptr;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mLightingPSO = nullptr;

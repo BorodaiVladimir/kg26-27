@@ -89,13 +89,33 @@ VsOut VS(VertexIn vin)
 {
     VsOut vout;
     float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
-    vout.PosW = posW.xyz;
     vout.NormalW = normalize(mul(vin.NormalL, (float3x3)gWorld));
     float4 texC = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform);
     float4 texCDisp = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransformDisp);
     vout.TexC = texC.xy;
     vout.TexCDisp = texCDisp.xy;
+    vout.PosW = posW.xyz;
     return vout;
+}
+
+DsOut TerrainVS(VertexIn vin)
+{
+    DsOut o = (DsOut)0.0f;
+    float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
+    float3 normalW = normalize(mul(vin.NormalL, (float3x3)gWorld));
+    float2 uv = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransform).xy;
+    float2 uvDisp = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransformDisp).xy;
+
+    float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
+    posW.xyz += normalW * (h * gTessParams.x + gTessParams.y);
+
+    o.PosW = posW.xyz;
+    o.NormalW = normalW;
+    o.TexC = uv;
+    o.TexCDisp = uvDisp;
+    o.PosV = mul(posW, gView).xyz;
+    o.PosH = mul(posW, gViewProj);
+    return o;
 }
 
 [domain("tri")]
@@ -141,8 +161,7 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
     float2 uvDisp = p[0].TexCDisp * bary.x + p[1].TexCDisp * bary.y + p[2].TexCDisp * bary.z;
 
     float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
-    float disp = h * gTessParams.x + gTessParams.y;
-    posW += normalW * disp;
+    posW += normalW * (h * gTessParams.x + gTessParams.y);
 
     float4 posW4 = float4(posW, 1.0f);
     o.PosW = posW;
@@ -169,7 +188,6 @@ GBufferOut PS(DsOut pin)
     float3 bumped;
     if (gMatPad.z > 0.5f)
     {
-        // Terrain: gMatPad.z = world size in metres; V grows toward -Z.
         float texelWorld = gMatPad.z / mapSize.x;
         float dhdx = (hR - hL) * gTessParams.x / (2.0f * texelWorld);
         float dhdz = (hD - hU) * gTessParams.x / (2.0f * texelWorld);

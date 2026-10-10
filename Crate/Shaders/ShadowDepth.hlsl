@@ -76,6 +76,16 @@ VsOut VS(VertexIn vin)
     return o;
 }
 
+float4 TerrainVS(VertexIn vin) : SV_POSITION
+{
+    float4 posW = mul(float4(vin.PosL, 1.0f), gWorld);
+    float3 normalW = normalize(mul(vin.NormalL, (float3x3)gWorld));
+    float2 uvDisp = mul(float4(vin.TexC, 0.0f, 1.0f), gTexTransformDisp).xy;
+    float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
+    posW.xyz += normalW * (h * gTessParams.x + gTessParams.y);
+    return mul(posW, gLightViewProj);
+}
+
 [domain("tri")]
 [partitioning("integer")]
 [outputtopology("triangle_cw")]
@@ -118,8 +128,7 @@ DsOut DS(HsPatch patchConst, float3 bary : SV_DomainLocation, const OutputPatch<
     float2 uvDisp = p[0].TexCDisp * bary.x + p[1].TexCDisp * bary.y + p[2].TexCDisp * bary.z;
 
     float h = gHeightNormalMap.SampleLevel(gsamLinear, uvDisp, 0).r;
-    float disp = h * gTessParams.x + gTessParams.y;
-    posW += normalW * disp;
+    posW += normalW * (h * gTessParams.x + gTessParams.y);
 
     o.PosH = mul(float4(posW, 1.0f), gLightViewProj);
     return o;

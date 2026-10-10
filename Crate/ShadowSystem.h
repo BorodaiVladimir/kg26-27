@@ -62,6 +62,7 @@ public:
 
     ID3D12RootSignature* GetRootSignature() const { return mRootSignature.Get(); }
     ID3D12PipelineState* GetPipelineState() const { return mShadowPSO.Get(); }
+    ID3D12PipelineState* GetTerrainPipelineState() const { return mTerrainShadowPSO.Get(); }
 
     D3D12_GPU_DESCRIPTOR_HANDLE GetShadowMapSrvGpu() const;
     D3D12_CPU_DESCRIPTOR_HANDLE GetShadowMapSrvCpu() const;
@@ -115,6 +116,7 @@ private:
     D3D12_RECT mShadowScissorRect;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> mRootSignature;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> mShadowPSO;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> mTerrainShadowPSO;
     Microsoft::WRL::ComPtr<ID3D12Resource> mShadowMap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> mDsvHeap;
     UploadBuffer<ShadowPassConstants>* mPassCB[kShadowFrameResourceCount] = {};

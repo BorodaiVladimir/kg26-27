@@ -48,7 +48,7 @@ XMMATRIX BuildLightViewMatrix(FXMVECTOR lightDirectionTowardScene, FXMVECTOR foc
     if (fabsf(XMVectorGetX(XMVector3Dot(upRef, forward))) > 0.99f)
         upRef = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
 
-    const XMVECTOR lightPos = XMVectorSubtract(focusWorld, XMVectorScale(forward, 300.0f));
+    const XMVECTOR lightPos = XMVectorSubtract(focusWorld, XMVectorScale(forward, 2800.0f));
     return XMMatrixLookAtLH(lightPos, focusWorld, upRef);
 }
 
@@ -190,7 +190,7 @@ void ShadowSystem::Initialize(
     {
         delete mPassCB[i];
         delete mLightingCB[i];
-        mPassCB[i] = new UploadBuffer<ShadowPassConstants>(device, 1, true);
+        mPassCB[i] = new UploadBuffer<ShadowPassConstants>(device, kCascadeCount, true);
         mLightingCB[i] = new UploadBuffer<ShadowLightingConstants>(device, 1, true);
     }
     mShadowViewport = { 0.0f, 0.0f, (float)kShadowMapSize, (float)kShadowMapSize, 0.0f, 1.0f };
@@ -319,8 +319,8 @@ void ShadowSystem::BuildPSO()
     psoDesc.DS = { ds->GetBufferPointer(), ds->GetBufferSize() };
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
     psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
-    psoDesc.RasterizerState.DepthBias = 0;
-    psoDesc.RasterizerState.SlopeScaledDepthBias = 0.0f;
+    psoDesc.RasterizerState.DepthBias = 100000;
+    psoDesc.RasterizerState.SlopeScaledDepthBias = 2.0f;
     psoDesc.RasterizerState.DepthBiasClamp = 0.0f;
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
@@ -331,6 +331,18 @@ void ShadowSystem::BuildPSO()
     psoDesc.SampleDesc.Count = 1;
 
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mShadowPSO)));
+
+    ComPtr<ID3DBlob> terrainVs = d3dUtil::CompileShader(L"Shaders\\ShadowDepth.hlsl", nullptr, "TerrainVS", "vs_5_0");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC terrainPsoDesc = psoDesc;
+    terrainPsoDesc.VS = { terrainVs->GetBufferPointer(), terrainVs->GetBufferSize() };
+    terrainPsoDesc.HS = {};
+    terrainPsoDesc.DS = {};
+    terrainPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    // Heightfield faces up. FRONT cull (used for Sponza) would drop every terrain triangle.
+    terrainPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    terrainPsoDesc.RasterizerState.DepthBias = 250000;
+    terrainPsoDesc.RasterizerState.SlopeScaledDepthBias = 3.5f;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&terrainPsoDesc, IID_PPV_ARGS(&mTerrainShadowPSO)));
 }
 
 void ShadowSystem::SetSceneBounds(FXMVECTOR minW, FXMVECTOR maxW)
@@ -589,8 +601,11 @@ void ShadowSystem::BeginCascade(ID3D12GraphicsCommandList* cmdList, UINT cascade
 
     ShadowPassConstants cb = {};
     cb.LightViewProj = mCascadeLightViewProj[cascadeIndex];
-    mPassCB[slot]->CopyData(0, cb);
-    cmdList->SetGraphicsRootConstantBufferView(1, mPassCB[slot]->Resource()->GetGPUVirtualAddress());
+    mPassCB[slot]->CopyData(cascadeIndex, cb);
+    const UINT cbBytes = d3dUtil::CalcConstantBufferByteSize(sizeof(ShadowPassConstants));
+    cmdList->SetGraphicsRootConstantBufferView(
+        1,
+        mPassCB[slot]->Resource()->GetGPUVirtualAddress() + static_cast<UINT64>(cascadeIndex) * cbBytes);
 }
 
 void ShadowSystem::EndPass(ID3D12GraphicsCommandList* cmdList)

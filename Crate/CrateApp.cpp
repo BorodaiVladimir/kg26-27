@@ -49,7 +49,6 @@ constexpr float kForestPatchHalfExtent = 24.0f;
 constexpr float kForestPatchCenterX = 0.0f;
 constexpr float kForestPatchCenterZ = -63.0f;
 static constexpr float kParticlesDisableCameraRadius = 34.0f;
-static constexpr float kShadowDisableCameraRadius = 46.0f;
 static constexpr UINT kPbrPointLightIndex = 0u;
 
 int NextSceneTextureSrvIndex(const std::map<std::string, int>& cache, int forestInstanceSrvBase, int reservedHeapEnd)
@@ -580,13 +579,11 @@ private:
     bool mHasTerrain = false;
     int mTerrainHeightSrvIndex = -1;
     static constexpr float kTerrainWorldSize = 2048.0f;
-    static constexpr float kTerrainHeightScale = 120.0f;
+    static constexpr float kTerrainHeightScale = 3000.0f;
     static constexpr int kTerrainMaxQuadDepth = 4;
     static constexpr float kTerrainLodDistanceFactor = 2.75f;
     static constexpr UINT kTerrainPatchGridVerts = 33;
     static constexpr UINT kTerrainMaxDrawTiles = 256;
-    // Old scene (Sponza, crates, forest) fits within ~95 m of the origin;
-    // the height map is flattened there to a pad just below Sponza's floor.
     static constexpr float kTerrainPadLevelY = -1.15f;
     static constexpr float kTerrainPadRadius = 95.0f;
     static constexpr float kTerrainPadBlendRadius = 220.0f;
@@ -601,11 +598,12 @@ private:
     int mTerrainHeightWidth = 0;
     int mTerrainHeightHeight = 0;
     std::vector<RenderItem*> mTerrainVisibleRitems;
+    std::vector<RenderItem*> mTerrainShadowRitems;
     size_t mTerrainTilesDrawn = 0;
     size_t mTerrainTilesLeafCount = 0;
     XMFLOAT3 mPbrWorldCenter = { 0.0f, 0.0f, 0.0f };
     bool mIblTexturesLoaded = false;
-    bool mEnableIbl = true;
+    bool mEnableIbl = false;
     float mIblMaxReflectionLod = 4.0f;
     bool mF8KeyDown = false;
     bool mUseBeckmannDistribution = false;
@@ -717,8 +715,8 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mCameraTarget = { 0.0f, 40.0f, 0.0f };
 
     // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
-    mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
-    mDirectionalLights[0].Strength = { 3.0f, 2.85f, 2.55f };
+    mDirectionalLights[0].Direction = { 0.52f, -0.72f, 0.46f };
+    mDirectionalLights[0].Strength = { 3.2f, 3.0f, 2.65f };
 
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
     {
@@ -1124,7 +1122,17 @@ void CrateApp::Draw(const GameTimer& gt)
         const XMMATRIX view = XMLoadFloat4x4(&mView);
         const XMMATRIX proj = XMLoadFloat4x4(&mProj);
         const XMVECTOR lightDir = XMLoadFloat3(&mDirectionalLights[0].Direction);
-        if (mHasSponzaBounds)
+        if (mHasTerrain)
+        {
+            mShadowSystem->SetUsePerCascadeMatrices(true);
+            const float half = kTerrainWorldSize * 0.5f;
+            const float minY = mTerrainHeightBias - kPondDepth - 4.0f;
+            const float maxY = mTerrainHeightBias + kTerrainHeightScale + 4.0f;
+            mShadowSystem->SetSceneBounds(
+                XMVectorSet(-half, minY, -half, 0.0f),
+                XMVectorSet(half, maxY, half, 0.0f));
+        }
+        else if (mHasSponzaBounds)
         {
             mShadowSystem->SetSceneBounds(
                 XMLoadFloat3(&mSponzaBoundsMin),
@@ -1132,20 +1140,14 @@ void CrateApp::Draw(const GameTimer& gt)
         }
 
         mShadowSystem->UpdateCascades(
-            view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
+            view, proj, lightDir, 1.0f, mHasTerrain ? 2200.0f : 1000.0f, 0.65f);
 
-        // Lighting always samples the shadow map, so when shadows are skipped
-        // the cascades are still cleared (depth 1 = fully lit).
-        const bool drawShadowCasters = mRadius <= kShadowDisableCameraRadius;
         mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
         for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
         {
             mShadowSystem->BeginCascade(mCommandList.Get(), c, mCurrFrameResourceIndex);
-            if (drawShadowCasters)
-            {
-                DrawRenderItemsShadow(mCommandList.Get(), mTerrainVisibleRitems);
-                DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
-            }
+            DrawRenderItemsShadow(mCommandList.Get(), mTerrainShadowRitems);
+            DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
         }
         mShadowSystem->EndPass(mCommandList.Get());
 
@@ -1502,7 +1504,7 @@ void CrateApp::FlattenTerrainForScene()
     const float half = kTerrainWorldSize * 0.5f;
 
     auto worldX = [&](int x) { return -half + (x / (float)(w - 1)) * kTerrainWorldSize; };
-    // V grows toward -Z (same convention as the tile grid).
+    // V grows toward -Z
     auto worldZ = [&](int y) { return half - (y / (float)(h - 1)) * kTerrainWorldSize; };
     auto smooth = [](float e0, float e1, float v)
     {
@@ -1594,7 +1596,9 @@ bool CrateApp::UploadTerrainHeightToGpu(int heapIndex)
     UpdateSubresources(mCommandList.Get(), tex->Resource.Get(), tex->UploadHeap.Get(), 0, 0, 1, &data);
 
     auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
-        tex->Resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        tex->Resource.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     mCommandList->ResourceBarrier(1, &barrier);
 
     CD3DX12_CPU_DESCRIPTOR_HANDLE handle(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
@@ -1689,7 +1693,7 @@ void CrateApp::BuildTerrainTilePool(int& objIndex)
         ri->ObjCBIndex = objIndex++;
         ri->Mat = matIt->second.get();
         ri->Geo = patchGeo;
-        ri->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST;
+        ri->PrimitiveType = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
         ri->IndexCount = drawArg->second.IndexCount;
         ri->StartIndexLocation = drawArg->second.StartIndexLocation;
         ri->BaseVertexLocation = drawArg->second.BaseVertexLocation;
@@ -1707,6 +1711,7 @@ void CrateApp::BuildTerrainTilePool(int& objIndex)
 void CrateApp::UpdateTerrainVisibility()
 {
     mTerrainVisibleRitems.clear();
+    mTerrainShadowRitems.clear();
     mTerrainTilesDrawn = 0;
     if (!mHasTerrain)
         return;
@@ -1720,11 +1725,12 @@ void CrateApp::UpdateTerrainVisibility()
     BoundingFrustum::CreateFromMatrix(frustumProj, proj);
 
     const float minTileSize = kTerrainWorldSize / (float)(1 << kTerrainMaxQuadDepth);
+    // Keep tiles behind the camera too: they still cast onto the visible slopes.
     mTerrainQuadtree.SelectTiles(
         mEyePos,
         kTerrainLodDistanceFactor,
         minTileSize,
-        mFrustumCullEnabled,
+        false,
         frustumProj,
         view,
         mTerrainHeightSamples.empty() ? nullptr : mTerrainHeightSamples.data(),
@@ -1757,8 +1763,6 @@ void CrateApp::UpdateTerrainVisibility()
         tiles.push_back(root);
     }
 
-    mTerrainTilesDrawn = tiles.size();
-
     std::vector<RenderItem*> pool;
     pool.reserve(mAllRitems.size());
     for (auto& e : mAllRitems)
@@ -1768,6 +1772,7 @@ void CrateApp::UpdateTerrainVisibility()
     }
 
     const size_t drawCount = (std::min)(tiles.size(), pool.size());
+    mTerrainShadowRitems.reserve(drawCount);
     mTerrainVisibleRitems.reserve(drawCount);
 
     for (size_t i = 0; i < drawCount; ++i)
@@ -1793,8 +1798,14 @@ void CrateApp::UpdateTerrainVisibility()
         XMStoreFloat4x4(&ri->TexTransformDisp, texTransform);
         ri->NumFramesDirty = gNumFrameResources;
 
-        mTerrainVisibleRitems.push_back(ri);
+        mTerrainShadowRitems.push_back(ri);
+        if (!mFrustumCullEnabled ||
+            FrustumContainsOrIntersectsAABB(frustumProj, view, tile.Bounds))
+        {
+            mTerrainVisibleRitems.push_back(ri);
+        }
     }
+    mTerrainTilesDrawn = mTerrainVisibleRitems.size();
 }
 
 bool CrateApp::LoadModelTexture(const std::string& texturePath, const std::string& texName, int heapIndex, bool forceSrgb)
@@ -4247,6 +4258,11 @@ void CrateApp::DrawRenderItemsShadow(ID3D12GraphicsCommandList* cmdList, const s
     auto objectCB = mCurrFrameResource->ObjectCB->Resource();
     auto matCB = mCurrFrameResource->MaterialCB->Resource();
 
+    if (ritems[0] && ritems[0]->IsTerrainTile)
+        cmdList->SetPipelineState(mShadowSystem->GetTerrainPipelineState());
+    else
+        cmdList->SetPipelineState(mShadowSystem->GetPipelineState());
+
     for (const RenderItem* ri : ritems)
     {
         if (!ri || !ri->Geo || ri->IsStressObject)
@@ -4294,6 +4310,10 @@ void CrateApp::DrawRenderItems(
     auto matCB = mCurrFrameResource->MaterialCB->Resource();
 
     const size_t drawCount = (std::min)(ritems.size(), maxCount);
+    const bool drawTerrain = drawCount > 0 && ritems[0] && ritems[0]->IsTerrainTile;
+    if (drawTerrain)
+        cmdList->SetPipelineState(mRenderingSystem->GetTerrainPSO(mGeometryWireframe));
+
     for (size_t i = 0; i < drawCount; ++i)
     {
         auto ri = ritems[i];
@@ -4339,6 +4359,9 @@ void CrateApp::DrawRenderItems(
 
         cmdList->DrawIndexedInstanced(ri->IndexCount, 1, ri->StartIndexLocation, ri->BaseVertexLocation, 0);
     }
+
+    if (drawTerrain)
+        cmdList->SetPipelineState(mRenderingSystem->GetGeometryPSO(mGeometryWireframe));
 }
 
 void CrateApp::UpdateCamera(const GameTimer& gt)
@@ -4494,7 +4517,7 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.FarZ = mHasTerrain ? 8000.0f : 1000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
-    mMainPassCB.AmbientLight = { 0.55f, 0.62f, 0.75f, 1.0f };
+    mMainPassCB.AmbientLight = { 0.16f, 0.19f, 0.26f, 1.0f };
     mMainPassCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
     mMainPassCB.Lights[0].Strength = { 0.6f, 0.6f, 0.6f };
     mMainPassCB.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };

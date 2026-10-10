@@ -457,6 +457,7 @@ void RenderingSystem::BuildShadersAndInputLayout()
     mShaders["deferredGeometryHS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "HS", "hs_5_0");
     mShaders["deferredGeometryDS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "DS", "ds_5_0");
     mShaders["deferredGeometryPS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "PS", "ps_5_0");
+    mShaders["terrainVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredGeometry.hlsl", nullptr, "TerrainVS", "vs_5_0");
     mShaders["solidGeometryVS"] = d3dUtil::CompileShader(L"Shaders\\SolidGeometry.hlsl", nullptr, "VS", "vs_5_0");
     mShaders["solidGeometryPS"] = d3dUtil::CompileShader(L"Shaders\\SolidGeometry.hlsl", nullptr, "PS", "ps_5_0");
     mShaders["deferredLightVS"] = d3dUtil::CompileShader(L"Shaders\\DeferredLighting.hlsl", nullptr, "VS", "vs_5_0");
@@ -532,6 +533,22 @@ void RenderingSystem::BuildPSOs()
     geometryPsoDesc.SampleDesc.Quality = 0;
     geometryPsoDesc.DSVFormat = mDepthStencilFormat;
     ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&geometryPsoDesc, IID_PPV_ARGS(&mGeometryPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC terrainPsoDesc = geometryPsoDesc;
+    terrainPsoDesc.VS =
+    {
+        reinterpret_cast<BYTE*>(mShaders["terrainVS"]->GetBufferPointer()),
+        mShaders["terrainVS"]->GetBufferSize()
+    };
+    terrainPsoDesc.HS = {};
+    terrainPsoDesc.DS = {};
+    terrainPsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&terrainPsoDesc, IID_PPV_ARGS(&mTerrainPSO)));
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC terrainWirePsoDesc = terrainPsoDesc;
+    terrainWirePsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    terrainWirePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    ThrowIfFailed(mDevice->CreateGraphicsPipelineState(&terrainWirePsoDesc, IID_PPV_ARGS(&mTerrainWireframePSO)));
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC solidPsoDesc = geometryPsoDesc;
     solidPsoDesc.VS =

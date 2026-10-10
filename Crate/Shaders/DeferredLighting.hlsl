@@ -147,8 +147,14 @@ float SampleShadowCascade(uint cascade, float3 samplePosW, float3 biasNormal)
     shadowH.xyz /= max(shadowH.w, 1e-6f);
 
     float2 shadowUV = shadowH.xy * float2(0.5f, -0.5f) + float2(0.5f, 0.5f);
+    if (shadowUV.x <= 0.0f || shadowUV.x >= 1.0f ||
+        shadowUV.y <= 0.0f || shadowUV.y >= 1.0f ||
+        shadowH.z <= 0.0f || shadowH.z >= 1.0f)
+    {
+        return 1.0f;
+    }
 
-    const float depthBias = 0.0001f + 0.0005f * (1.0f - ndotl);
+    const float depthBias = 0.0020f + 0.0030f * (float)cascade + 0.0060f * (1.0f - ndotl);
     const float depth = saturate(shadowH.z - depthBias);
 
     float shadow = 0.0f;
@@ -172,14 +178,15 @@ float CalcShadowFactor(float3 posW, float3 shadingNormalW)
 
     float3 lightDir = normalize(-gLightDirectionW);
     float ndotl = saturate(dot(shadingNormalW, lightDir));
-    float3 samplePosW = posW + shadingNormalW * (0.0006f * (1.0f - ndotl) + 0.00015f);
+    const float nOffset = 0.12f + 0.28f * (1.0f - ndotl) + 0.10f * (float)cascade;
+    float3 samplePosW = posW + shadingNormalW * nOffset + lightDir * 0.08f;
 
     float shadow = SampleShadowCascade(cascade, samplePosW, shadingNormalW);
 
     if (cascade > 0u)
     {
         const float prevSplit = gCascadeSplits[cascade - 1u];
-        const float blendWidth = max(prevSplit * 0.08f, 0.35f);
+        const float blendWidth = max(prevSplit * 0.22f, 12.0f);
         const float blendStart = prevSplit - blendWidth;
         const float t = saturate((viewDepth - blendStart) / max(blendWidth, 1e-4f));
         if (t < 1.0f)
@@ -189,6 +196,9 @@ float CalcShadowFactor(float3 posW, float3 shadingNormalW)
         }
     }
 
+    const float fadeStart = gCascadeSplits[NUM_CASCADES - 1u] * 0.72f;
+    const float fadeEnd = gCascadeSplits[NUM_CASCADES - 1u];
+    shadow = lerp(shadow, 1.0f, saturate((viewDepth - fadeStart) / max(fadeEnd - fadeStart, 1e-4f)));
     return shadow;
 }
 
@@ -340,7 +350,7 @@ float4 PS(VSOut pin) : SV_Target
             roughness);
     }
 
-    if (!isParticle)
+    if (false)
     {
         const float shadowAmt = saturate(1.0f - shadowFactor);
         const float overlayBlend = smoothstep(0.78f, 0.92f, shadowAmt);
