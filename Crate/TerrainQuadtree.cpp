@@ -86,7 +86,8 @@ BoundingBox TerrainQuadtree::ComputeTileBounds(
     const float* heightSamples,
     int heightWidth,
     int heightHeight,
-    float heightScale)
+    float heightScale,
+    float heightBias)
 {
     float minY = 0.0f;
     float maxY = heightScale;
@@ -109,12 +110,11 @@ BoundingBox TerrainQuadtree::ComputeTileBounds(
                 maxY = (std::max)(maxY, h * heightScale);
             }
         }
-        minY = (std::max)(minY, 0.0f);
         maxY = (std::max)(maxY, minY + 0.5f);
     }
 
-    const XMFLOAT3 minimum(minX, minY, minZ);
-    const XMFLOAT3 maximum(minX + size, maxY, minZ + size);
+    const XMFLOAT3 minimum(minX, minY + heightBias, minZ);
+    const XMFLOAT3 maximum(minX + size, maxY + heightBias, minZ + size);
     BoundingBox box;
     BoundingBox::CreateFromPoints(box, XMLoadFloat3(&minimum), XMLoadFloat3(&maximum));
     return box;
@@ -216,7 +216,8 @@ void TerrainQuadtree::SelectRecursive(
         heightSamples,
         heightWidth,
         heightHeight,
-        heightScale);
+        heightScale,
+        mHeightBias);
 
     if (frustumCullEnabled &&
         !FrustumContainsOrIntersectsAABB(frustumProj, viewWorld, tile.Bounds))

@@ -93,6 +93,24 @@ bool IsSurfacePixel(float3 posW)
     return dot(posW, posW) > 1e-4f;
 }
 
+float3 DaySkyColor(float2 uv)
+{
+    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
+    float4 farW = mul(float4(ndc, 1.0f, 1.0f), gInvViewProj);
+    float3 dir = normalize(farW.xyz / farW.w - gEyePosW);
+
+    const float3 zenith = float3(0.28f, 0.50f, 0.85f);
+    const float3 horizon = float3(0.72f, 0.82f, 0.94f);
+    const float3 ground = float3(0.42f, 0.46f, 0.50f);
+    float3 sky = dir.y >= 0.0f
+        ? lerp(horizon, zenith, pow(saturate(dir.y), 0.6f))
+        : lerp(horizon, ground, saturate(-dir.y * 4.0f));
+
+    float sunDot = saturate(dot(dir, normalize(-gLightDirectionW)));
+    sky += float3(1.0f, 0.95f, 0.8f) * (pow(sunDot, 900.0f) * 6.0f + pow(sunDot, 12.0f) * 0.25f);
+    return sky;
+}
+
 bool IsParticlePixel(float materialFlags)
 {
     return materialFlags < 0.0f;
@@ -266,7 +284,7 @@ float4 PS(VSOut pin) : SV_Target
     float3 posW = posData.xyz;
 
     if (!IsSurfacePixel(posW))
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        return float4(DaySkyColor(uv), 1.0f);
 
     float3 toEye = normalize(gEyePosW - posW);
     const bool isParticle = IsParticlePixel(material.w);

@@ -37,6 +37,9 @@ public:
 
     int MaxLeafCount() const { return mMaxLeafCount; }
 
+    // World Y = sample * heightScale + heightBias.
+    void SetHeightBias(float heightBias) { mHeightBias = heightBias; }
+
     static DirectX::BoundingBox ComputeTileBounds(
         float minX,
         float minZ,
@@ -47,7 +50,8 @@ public:
         const float* heightSamples,
         int heightWidth,
         int heightHeight,
-        float heightScale);
+        float heightScale,
+        float heightBias);
 
 private:
     struct Node
@@ -77,5 +81,6 @@ private:
     std::unique_ptr<Node> mRoot;
     float mWorldHalf = 0.0f;
     float mWorldSize = 0.0f;
+    float mHeightBias = 0.0f;
     int mMaxLeafCount = 0;
 };

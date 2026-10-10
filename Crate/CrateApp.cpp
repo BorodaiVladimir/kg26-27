@@ -502,6 +502,9 @@ private:
     void CreateBoxGeometry();
     void CreateWaterPlaneGeometry();
     void LoadTerrainHeightMap();
+    bool ReadHeightMapPng(const char* relativePath);
+    void FlattenTerrainForScene();
+    bool UploadTerrainHeightToGpu(int heapIndex);
     void CreateTerrainPatchGeometry();
     void BuildTerrainTilePool(int& objIndex);
     void UpdateTerrainVisibility();
@@ -582,7 +585,17 @@ private:
     static constexpr float kTerrainLodDistanceFactor = 2.75f;
     static constexpr UINT kTerrainPatchGridVerts = 33;
     static constexpr UINT kTerrainMaxDrawTiles = 256;
-    static constexpr float kTerrainSkirtDepth = 20.0f;
+    // Old scene (Sponza, crates, forest) fits within ~95 m of the origin;
+    // the height map is flattened there to a pad just below Sponza's floor.
+    static constexpr float kTerrainPadLevelY = -1.15f;
+    static constexpr float kTerrainPadRadius = 95.0f;
+    static constexpr float kTerrainPadBlendRadius = 220.0f;
+    static constexpr float kPondCenterX = 0.0f;
+    static constexpr float kPondCenterZ = 48.0f;
+    static constexpr float kPondRadius = 16.0f;
+    static constexpr float kPondDepth = 2.5f;
+    static constexpr float kPondWaterBelowPad = 0.5f;
+    float mTerrainHeightBias = 0.0f;
     TerrainQuadtree mTerrainQuadtree;
     std::vector<float> mTerrainHeightSamples;
     int mTerrainHeightWidth = 0;
@@ -705,7 +718,7 @@ CrateApp::CrateApp(HINSTANCE hInstance)
 
     // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
     mDirectionalLights[0].Direction = { 0.25f, -0.90f, 0.35f };
-    mDirectionalLights[0].Strength = { 0.55f, 0.75f, 2.2f };
+    mDirectionalLights[0].Strength = { 3.0f, 2.85f, 2.55f };
 
     for (UINT i = 0; i < kDeferredPointLightCount; ++i)
     {
@@ -1121,17 +1134,20 @@ void CrateApp::Draw(const GameTimer& gt)
         mShadowSystem->UpdateCascades(
             view, proj, lightDir, 1.0f, 1000.0f, ShadowSystem::kDefaultSplitLambda);
 
-        if (mRadius <= kShadowDisableCameraRadius)
+        // Lighting always samples the shadow map, so when shadows are skipped
+        // the cascades are still cleared (depth 1 = fully lit).
+        const bool drawShadowCasters = mRadius <= kShadowDisableCameraRadius;
+        mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
+        for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
         {
-            mShadowSystem->BeginPass(mCommandList.Get(), passAddress);
-            for (UINT c = 0; c < ShadowSystem::kCascadeCount; ++c)
+            mShadowSystem->BeginCascade(mCommandList.Get(), c, mCurrFrameResourceIndex);
+            if (drawShadowCasters)
             {
-                mShadowSystem->BeginCascade(mCommandList.Get(), c, mCurrFrameResourceIndex);
                 DrawRenderItemsShadow(mCommandList.Get(), mTerrainVisibleRitems);
                 DrawRenderItemsShadow(mCommandList.Get(), mSponzaOpaqueRitems);
             }
-            mShadowSystem->EndPass(mCommandList.Get());
         }
+        mShadowSystem->EndPass(mCommandList.Get());
 
         mShadowSystem->UpdateLightingConstants(lightDir, mCurrFrameResourceIndex);
         mCommandList->RSSetViewports(1, &mScreenViewport);
@@ -1430,88 +1446,170 @@ void CrateApp::CreateWaterPlaneGeometry()
     OutputDebugStringA("Water plane geometry created\n");
 }
 
+bool CrateApp::ReadHeightMapPng(const char* relativePath)
+{
+    const std::string path = ResolveMediaPath(relativePath);
+    const std::wstring wpath(path.begin(), path.end());
+
+    ScratchImage png;
+    if (FAILED(LoadFromWICFile(wpath.c_str(), WIC_FLAGS_IGNORE_SRGB, nullptr, png)))
+        return false;
+
+    ScratchImage asFloat;
+    if (FAILED(Convert(
+            png.GetImages(), png.GetImageCount(), png.GetMetadata(),
+            DXGI_FORMAT_R32_FLOAT, TEX_FILTER_DEFAULT, 0.0f, asFloat)))
+    {
+        return false;
+    }
+
+    const Image* img = asFloat.GetImage(0, 0, 0);
+    if (!img || img->width < 2 || img->height < 2)
+        return false;
+
+    mTerrainHeightWidth = (int)img->width;
+    mTerrainHeightHeight = (int)img->height;
+    mTerrainHeightSamples.resize((size_t)img->width * img->height);
+
+    for (size_t y = 0; y < img->height; ++y)
+    {
+        const float* row = reinterpret_cast<const float*>(img->pixels + y * img->rowPitch);
+        std::copy(row, row + img->width, mTerrainHeightSamples.begin() + y * img->width);
+    }
+    return true;
+}
+
 void CrateApp::LoadTerrainHeightMap()
 {
-    mHasTerrain = false;
-    mTerrainHeightSrvIndex = -1;
-    mTerrainHeightSamples.clear();
-    mTerrainHeightWidth = 0;
-    mTerrainHeightHeight = 0;
-
-    const char* tryPaths[] = {
-        "../Models/Terrain/terrain_height.png",
-        "Models/Terrain/terrain_height.png",
-        "../../Models/Terrain/terrain_height.png",
-        "../Models/Terrain/terrain_height.tga",
-    };
-
-    for (const char* path : tryPaths)
+    if (!ReadHeightMapPng("../Models/Terrain/terrain_height.png"))
     {
-        const std::string resolved = ResolveMediaPath(path);
-        if (!FileExistsA_Local(resolved.c_str()))
-            continue;
-
-        if (!LoadModelTexture(path, "terrainHeight", 2, false))
-            continue;
-
-        mHasTerrain = true;
-        mTerrainHeightSrvIndex = 2;
-
-        std::wstring wpath(resolved.begin(), resolved.end());
-        ScratchImage image;
-        TexMetadata metadata;
-        HRESULT hr = LoadFromWICFile(wpath.c_str(), WIC_FLAGS_NONE, &metadata, image);
-        if (FAILED(hr))
-            hr = LoadFromTGAFile(wpath.c_str(), &metadata, image);
-
-        if (SUCCEEDED(hr))
-        {
-            ScratchImage rgba;
-            const Image* img = image.GetImage(0, 0, 0);
-            if (img && metadata.format != DXGI_FORMAT_R8G8B8A8_UNORM &&
-                metadata.format != DXGI_FORMAT_B8G8R8A8_UNORM)
-            {
-                if (SUCCEEDED(Convert(image.GetImages(), image.GetImageCount(), metadata,
-                    DXGI_FORMAT_R8G8B8A8_UNORM, TEX_FILTER_DEFAULT, 0.0f, rgba)))
-                {
-                    metadata = rgba.GetMetadata();
-                    img = rgba.GetImage(0, 0, 0);
-                }
-            }
-
-            if (img && img->width > 0 && img->height > 0)
-            {
-                mTerrainHeightWidth = (int)img->width;
-                mTerrainHeightHeight = (int)img->height;
-                mTerrainHeightSamples.resize((size_t)mTerrainHeightWidth * (size_t)mTerrainHeightHeight);
-
-                const size_t bpp = DirectX::BitsPerPixel(metadata.format) / 8;
-                for (int y = 0; y < mTerrainHeightHeight; ++y)
-                {
-                    for (int x = 0; x < mTerrainHeightWidth; ++x)
-                    {
-                        const uint8_t* px = img->pixels + (size_t)y * img->rowPitch + (size_t)x * bpp;
-                        mTerrainHeightSamples[(size_t)y * (size_t)mTerrainHeightWidth + (size_t)x] = px[0] / 255.0f;
-                    }
-                }
-            }
-        }
-        else
-        {
-            OutputDebugStringA("Terrain: CPU height samples skipped (WIC read failed), GPU map still used\n");
-        }
-
-        char msg[160];
-        sprintf_s(
-            msg,
-            "Terrain height loaded: GPU SRV 2, CPU %dx%d, path OK\n",
-            mTerrainHeightWidth,
-            mTerrainHeightHeight);
-        OutputDebugStringA(msg);
+        OutputDebugStringA("Terrain: terrain_height.png not found, terrain disabled\n");
         return;
     }
 
-    OutputDebugStringA("Terrain: ../Models/Terrain/terrain_height.png not found — skipping.\n");
+    FlattenTerrainForScene();
+    if (!UploadTerrainHeightToGpu(2))
+        return;
+
+    mHasTerrain = true;
+    mTerrainQuadtree.SetHeightBias(mTerrainHeightBias);
+}
+
+void CrateApp::FlattenTerrainForScene()
+{
+    const int w = mTerrainHeightWidth;
+    const int h = mTerrainHeightHeight;
+    const float half = kTerrainWorldSize * 0.5f;
+
+    auto worldX = [&](int x) { return -half + (x / (float)(w - 1)) * kTerrainWorldSize; };
+    // V grows toward -Z (same convention as the tile grid).
+    auto worldZ = [&](int y) { return half - (y / (float)(h - 1)) * kTerrainWorldSize; };
+    auto smooth = [](float e0, float e1, float v)
+    {
+        const float t = std::clamp((v - e0) / (e1 - e0), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+
+    double sum = 0.0;
+    int count = 0;
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            const float wx = worldX(x);
+            const float wz = worldZ(y);
+            if (wx * wx + wz * wz <= kTerrainPadRadius * kTerrainPadRadius)
+            {
+                sum += mTerrainHeightSamples[(size_t)y * (size_t)w + (size_t)x];
+                ++count;
+            }
+        }
+    }
+    const float padHeight = count > 0 ? (float)(sum / count) : 0.0f;
+    mTerrainHeightBias = kTerrainPadLevelY - padHeight * kTerrainHeightScale;
+
+    const float pondDepth01 = kPondDepth / kTerrainHeightScale;
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            const float wx = worldX(x);
+            const float wz = worldZ(y);
+            float& sample = mTerrainHeightSamples[(size_t)y * (size_t)w + (size_t)x];
+
+            const float d = sqrtf(wx * wx + wz * wz);
+            const float t = smooth(kTerrainPadRadius, kTerrainPadBlendRadius, d);
+            sample = padHeight + (sample - padHeight) * t;
+
+            const float px = wx - kPondCenterX;
+            const float pz = wz - kPondCenterZ;
+            const float pd2 = (px * px + pz * pz) / (kPondRadius * kPondRadius);
+            if (pd2 < 1.0f)
+                sample -= pondDepth01 * (1.0f - pd2);
+        }
+    }
+}
+
+bool CrateApp::UploadTerrainHeightToGpu(int heapIndex)
+{
+    const int w = mTerrainHeightWidth;
+    const int h = mTerrainHeightHeight;
+
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = (UINT64)w;
+    texDesc.Height = (UINT)h;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    auto tex = std::make_unique<Texture>();
+    tex->Name = "terrainHeight";
+
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(md3dDevice->CreateCommittedResource(
+        &defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex->Resource))))
+    {
+        return false;
+    }
+
+    const UINT64 uploadSize = GetRequiredIntermediateSize(tex->Resource.Get(), 0, 1);
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
+    if (FAILED(md3dDevice->CreateCommittedResource(
+        &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&tex->UploadHeap))))
+    {
+        return false;
+    }
+
+    D3D12_SUBRESOURCE_DATA data = {};
+    data.pData = mTerrainHeightSamples.data();
+    data.RowPitch = (LONG_PTR)w * sizeof(float);
+    data.SlicePitch = data.RowPitch * h;
+    UpdateSubresources(mCommandList.Get(), tex->Resource.Get(), tex->UploadHeap.Get(), 0, 0, 1, &data);
+
+    auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        tex->Resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    mCommandList->ResourceBarrier(1, &barrier);
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE handle(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+    handle.Offset(heapIndex, mCbvSrvDescriptorSize);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+    md3dDevice->CreateShaderResourceView(tex->Resource.Get(), &srvDesc, handle);
+
+    mTextures[tex->Name] = std::move(tex);
+    mTerrainHeightSrvIndex = heapIndex;
+    return true;
 }
 
 void CrateApp::CreateTerrainPatchGeometry()
@@ -1532,33 +1630,6 @@ void CrateApp::CreateTerrainPatchGeometry()
     }
 
     std::vector<std::uint32_t> indices = grid.Indices32;
-
-    // Skirts hide cracks between neighbouring tiles of different LOD.
-    // World Y scale of a tile is 1, so local Y is the skirt depth in metres.
-    const UINT n = kTerrainPatchGridVerts;
-    auto addSkirtEdge = [&](auto gridIndex)
-    {
-        for (UINT k = 0; k + 1 < n; ++k)
-        {
-            const std::uint32_t a = gridIndex(k);
-            const std::uint32_t b = gridIndex(k + 1);
-            const std::uint32_t a2 = (std::uint32_t)vertices.size();
-            Vertex va = vertices[a];
-            Vertex vb = vertices[b];
-            va.Pos.y = -kTerrainSkirtDepth;
-            vb.Pos.y = -kTerrainSkirtDepth;
-            vertices.push_back(va);
-            vertices.push_back(vb);
-            const std::uint32_t b2 = a2 + 1;
-
-            indices.insert(indices.end(), { a, b, a2, a2, b, b2 });
-            indices.insert(indices.end(), { a, a2, b, a2, b2, b });
-        }
-    };
-    addSkirtEdge([&](UINT k) { return (std::uint32_t)k; });
-    addSkirtEdge([&](UINT k) { return (std::uint32_t)((n - 1) * n + k); });
-    addSkirtEdge([&](UINT k) { return (std::uint32_t)(k * n); });
-    addSkirtEdge([&](UINT k) { return (std::uint32_t)(k * n + n - 1); });
 
     auto geo = std::make_unique<MeshGeometry>();
     geo->Name = "TerrainPatch";
@@ -1681,7 +1752,8 @@ void CrateApp::UpdateTerrainVisibility()
             mTerrainHeightSamples.empty() ? nullptr : mTerrainHeightSamples.data(),
             mTerrainHeightWidth,
             mTerrainHeightHeight,
-            kTerrainHeightScale);
+            kTerrainHeightScale,
+            mTerrainHeightBias);
         tiles.push_back(root);
     }
 
@@ -3492,7 +3564,7 @@ void CrateApp::BuildMaterials()
             (float)(mTerrainHeightWidth > 0 ? mTerrainHeightWidth : 1025),
             (float)(mTerrainHeightHeight > 0 ? mTerrainHeightHeight : 1025),
             kTerrainWorldSize);
-        terrain->TessellationParams = XMFLOAT4(kTerrainHeightScale, 0.0f, 800.0f, 0.0f);
+        terrain->TessellationParams = XMFLOAT4(kTerrainHeightScale, mTerrainHeightBias, 800.0f, 0.0f);
         terrain->ChessboardParams = XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
         mMaterials["terrain"] = std::move(terrain);
         OutputDebugStringA("Material 'terrain' created\n");
@@ -3732,6 +3804,14 @@ void CrateApp::BuildRenderItems()
             }
             XMMATRIX scale = XMMatrixScaling(1.0f, 1.0f, 1.0f);
             XMMATRIX translation = XMMatrixTranslation(0.0f, -2.5f, 0.0f);
+            if (mHasTerrain)
+            {
+                // Water mesh is 120 m wide; shrink it to the pond basin.
+                const float pondScale = (2.0f * kPondRadius) / 120.0f;
+                scale = XMMatrixScaling(pondScale, 1.0f, pondScale);
+                translation = XMMatrixTranslation(
+                    kPondCenterX, kTerrainPadLevelY - kPondWaterBelowPad, kPondCenterZ);
+            }
             XMStoreFloat4x4(&waterRi->World, scale * translation);
             waterRi->AnimateTexture = false;
             waterRi->TextureScaleU = 1.0f;
@@ -4283,7 +4363,8 @@ void CrateApp::UpdateCamera(const GameTimer& gt)
     else
         forward = XMVectorSet(sinf(mTheta), 0.0f, cosf(mTheta), 0.0f);
 
-    XMVECTOR right = XMVector3Normalize(XMVector3Cross(forward, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)));
+    // Left-handed space: up x forward points to the camera's right.
+    XMVECTOR right = XMVector3Normalize(XMVector3Cross(XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f), forward));
     const float move = mCameraMoveSpeed * gt.DeltaTime();
 
     if ((GetAsyncKeyState('W') & 0x8000) != 0)
@@ -4413,7 +4494,7 @@ void CrateApp::UpdateMainPassCB(const GameTimer& gt)
     mMainPassCB.FarZ = mHasTerrain ? 8000.0f : 1000.0f;
     mMainPassCB.TotalTime = gt.TotalTime();
     mMainPassCB.DeltaTime = gt.DeltaTime();
-    mMainPassCB.AmbientLight = { 0.32f, 0.32f, 0.42f, 1.0f };
+    mMainPassCB.AmbientLight = { 0.55f, 0.62f, 0.75f, 1.0f };
     mMainPassCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
     mMainPassCB.Lights[0].Strength = { 0.6f, 0.6f, 0.6f };
     mMainPassCB.Lights[1].Direction = { -0.57735f, -0.57735f, 0.57735f };
