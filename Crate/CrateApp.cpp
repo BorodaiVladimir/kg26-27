@@ -579,10 +579,11 @@ private:
     bool mHasTerrain = false;
     int mTerrainHeightSrvIndex = -1;
     static constexpr float kTerrainWorldSize = 2048.0f;
-    static constexpr float kTerrainHeightScale = 3000.0f;
+    static constexpr float kTerrainHeightScale = 120.0f;
     static constexpr int kTerrainMaxQuadDepth = 4;
     static constexpr float kTerrainLodDistanceFactor = 2.75f;
     static constexpr UINT kTerrainPatchGridVerts = 33;
+    static constexpr float kTerrainSkirtDepth = 128.0f;
     static constexpr UINT kTerrainMaxDrawTiles = 256;
     static constexpr float kTerrainPadLevelY = -1.15f;
     static constexpr float kTerrainPadRadius = 95.0f;
@@ -714,7 +715,6 @@ CrateApp::CrateApp(HINSTANCE hInstance)
     mRadius = 380.0f;
     mCameraTarget = { 0.0f, 40.0f, 0.0f };
 
-    // Direction = куда летят лучи света (мировое пространство): сверху-вниз в сцену.
     mDirectionalLights[0].Direction = { 0.52f, -0.72f, 0.46f };
     mDirectionalLights[0].Strength = { 3.2f, 3.0f, 2.65f };
 
@@ -1635,6 +1635,50 @@ void CrateApp::CreateTerrainPatchGeometry()
 
     std::vector<std::uint32_t> indices = grid.Indices32;
 
+    // Vertical skirts along the four edges hide T-junction cracks between LOD tiles.
+    // Same XZ/UV as the rim so height matches the edge, then drop in Y.
+    const UINT n = kTerrainPatchGridVerts;
+    const auto addSkirtStrip = [&](const std::vector<UINT>& edge, bool flipWinding)
+    {
+        const UINT firstSkirt = (UINT)vertices.size();
+        for (UINT idx : edge)
+        {
+            Vertex v = vertices[idx];
+            v.Pos.y = -kTerrainSkirtDepth;
+            vertices.push_back(v);
+        }
+        for (UINT k = 0; k + 1 < (UINT)edge.size(); ++k)
+        {
+            const UINT e0 = edge[k];
+            const UINT e1 = edge[k + 1];
+            const UINT s0 = firstSkirt + k;
+            const UINT s1 = firstSkirt + k + 1;
+            if (!flipWinding)
+            {
+                indices.push_back(e0); indices.push_back(e1); indices.push_back(s0);
+                indices.push_back(s0); indices.push_back(e1); indices.push_back(s1);
+            }
+            else
+            {
+                indices.push_back(e0); indices.push_back(s0); indices.push_back(e1);
+                indices.push_back(e1); indices.push_back(s0); indices.push_back(s1);
+            }
+        }
+    };
+
+    std::vector<UINT> north(n), south(n), west(n), east(n);
+    for (UINT i = 0; i < n; ++i)
+    {
+        north[i] = i;
+        south[i] = (n - 1) * n + i;
+        west[i] = i * n;
+        east[i] = i * n + (n - 1);
+    }
+    addSkirtStrip(north, false);
+    addSkirtStrip(south, true);
+    addSkirtStrip(west, false);
+    addSkirtStrip(east, true);
+
     auto geo = std::make_unique<MeshGeometry>();
     geo->Name = "TerrainPatch";
 
@@ -1669,7 +1713,7 @@ void CrateApp::CreateTerrainPatchGeometry()
     char msg[160];
     sprintf_s(
         msg,
-        "Terrain patch mesh: %u verts, world %.0f m, quadtree depth %d\n",
+        "Terrain patch mesh: %u verts + skirts, world %.0f m, quadtree depth %d\n",
         kTerrainPatchGridVerts,
         kTerrainWorldSize,
         kTerrainMaxQuadDepth);
